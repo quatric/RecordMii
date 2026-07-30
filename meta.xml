@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<app version="1">
+  <name>RecordMii</name>
+  <coder>quatric</coder>
+  <version>0.1</version>
+  <release_date>20260723</release_date>
+  <short_description>Record the Wii Speak to WAV</short_description>
+  <long_description>Records audio from a Wii Speak to 16-bit mono WAV files in sd:/wiispeak.
+
+Requires pmic_firm.bin (the Wii Speak's boot firmware, extracted from an RVL SDK
+pmic.a) alongside this app. Rate, mic gain and the echo canceller are adjustable.
+
+A: start/stop recording. LEFT/RIGHT: sample rate. UP/DOWN: gain. B: echo canceller.
+HOME: exit.</long_description>
+</app>

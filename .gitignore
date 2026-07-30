@@ -1,0 +1,6 @@
+build/
+boot.elf
+boot.dol
+*.map
+pmic_firm.bin
+data/pmic_firm.bin
