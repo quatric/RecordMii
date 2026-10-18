@@ -45,6 +45,13 @@ LIBDIRS	:=	$(CURDIR)/libinput-wii
 # no real need to edit anything past this point unless you need to add additional
 # rules for different file extensions
 #---------------------------------------------------------------------------------
+# The .dol that goes into the Homebrew Channel package.
+ifeq ($(NO_DOLXZ),1)
+BOOT_DOL	=	$(TARGET).dol
+else
+BOOT_DOL	=	$(TARGET)-xz.dol
+endif
+
 ifneq ($(BUILD),$(notdir $(CURDIR)))
 #---------------------------------------------------------------------------------
 
@@ -104,7 +111,7 @@ $(BUILD):
 #---------------------------------------------------------------------------------
 clean:
 	@echo clean ...
-	@rm -fr $(BUILD) $(OUTPUT).elf $(OUTPUT).dol
+	@rm -fr $(BUILD) $(OUTPUT).elf $(OUTPUT).dol $(OUTPUT)-xz.dol
 
 #---------------------------------------------------------------------------------
 # Embeds the Wii Speak boot firmware in the binary.  Point SDK at an RVL SDK
@@ -137,6 +144,16 @@ DEPENDS	:=	$(OFILES:.o=.d)
 #---------------------------------------------------------------------------------
 # main targets
 #---------------------------------------------------------------------------------
+#---------------------------------------------------------------------------------
+# Self-extracting xz-compressed copy of the .dol (FIX94's dolxz, see
+# scripts/dolxz.sh). It is the default target; NO_DOLXZ=1 skips it.
+#---------------------------------------------------------------------------------
+ifneq ($(NO_DOLXZ),1)
+$(OUTPUT)-xz.dol: $(OUTPUT).dol
+	@echo compressing ... $(notdir $@)
+	@sh $(dir $(OUTPUT))scripts/dolxz.sh $< $@
+endif
+
 $(OUTPUT).dol: $(OUTPUT).elf
 $(OUTPUT).elf: $(OFILES)
 

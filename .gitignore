@@ -1,6 +1,8 @@
 build/
 boot.elf
 boot.dol
+boot-xz.dol
 *.map
 pmic_firm.bin
 data/pmic_firm.bin
+.dolxz/
