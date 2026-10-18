@@ -17,7 +17,7 @@ include $(DEVKITPPC)/wii_rules
 #---------------------------------------------------------------------------------
 TARGET		:=	boot
 BUILD		:=	build
-SOURCES		:=	source
+SOURCES		:=	source libinput-wii/source
 DATA		:=	data
 INCLUDES	:=	source
 
@@ -33,13 +33,13 @@ LDFLAGS	=	-g $(MACHDEP) -Wl,-Map,$(notdir $@).map
 #---------------------------------------------------------------------------------
 # any extra libraries we wish to link with the project
 #---------------------------------------------------------------------------------
-LIBS	:=	-lfat -lasnd -lwiiuse -lbte -logc -lm
+LIBS	:=	-lfat -lwiikeyboard -lasnd -lwiiuse -lbte -logc -lm
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing
 # include and lib
 #---------------------------------------------------------------------------------
-LIBDIRS	:=
+LIBDIRS	:=	$(CURDIR)/libinput-wii
 
 #---------------------------------------------------------------------------------
 # no real need to edit anything past this point unless you need to add additional

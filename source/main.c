@@ -11,6 +11,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <wiiuse/wpad.h>
+#include <input_wii.h>
 
 #include "playback.h"
 #include "wav.h"
@@ -102,8 +103,8 @@ static void wait_for_home(void)
 {
 	printf("\nPress HOME to exit.\n");
 	while (1) {
-		WPAD_ScanPads();
-		if (WPAD_ButtonsDown(0) & WPAD_BUTTON_HOME)
+		INPUT_Update();
+		if (INPUT_ButtonsDown() & WPAD_BUTTON_HOME)
 			return;
 		VIDEO_WaitVSync();
 	}
@@ -253,7 +254,8 @@ int main(int argc, char **argv)
 	/* Before WPAD/FAT: an IOS reload here would tear them down. */
 	ensure_usb_ios();
 
-	WPAD_Init();
+	/* Buttons only: no IR pointer and no mouse. */
+	INPUT_InitEx(INPUT_INIT_NO_POINTER | INPUT_INIT_NO_MOUSE);
 
 	if (!fatInitDefault()) {
 		printf("Could not mount the SD card.\n");
@@ -323,8 +325,8 @@ int main(int argc, char **argv)
 		u32 got, held;
 		u32 pressed;
 
-		WPAD_ScanPads();
-		pressed = WPAD_ButtonsDown(0);
+		INPUT_Update();
+		pressed = INPUT_ButtonsDown();
 
 		if (pressed & WPAD_BUTTON_HOME)
 			break;
