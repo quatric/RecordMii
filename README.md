@@ -13,6 +13,13 @@ own boot and register protocol. This app reimplements Nintendo's `PMIC` library
 ("Party Mic", the Wii Speak's development name) on top of libogc's
 `/dev/usb/oh0` wrapper.
 
+## Download
+
+Grab the latest build from the [latest release](../../releases/latest): `RecordMii-wii.zip`. Every push to the main branch refreshes it, and tagged versions get their own entry on the [releases page](../../releases).
+
+1. Extract `RecordMii-wii.zip` to the root of your SD card (or USB drive).
+2. Open RecordMii from the Homebrew Channel.
+
 ## Building
 
 ```bash
