@@ -26,6 +26,9 @@ INCLUDES	:=	source
 #---------------------------------------------------------------------------------
 
 CFLAGS	= -g -O2 -Wall -Wextra $(MACHDEP) $(INCLUDE)
+# Version for the update check: the release tag when CI builds one, else meta.xml
+APP_VERSION	?=	$(if $(filter refs/tags/%,$(GITHUB_REF)),$(GITHUB_REF_NAME),$(shell sed -n 's:.*<version>\(.*\)</version>.*:\1:p' $(dir $(abspath $(firstword $(MAKEFILE_LIST))))meta.xml))
+CFLAGS	+=	-DAPP_VERSION=\"$(APP_VERSION)\"
 CXXFLAGS	=	$(CFLAGS)
 
 LDFLAGS	=	-g $(MACHDEP) -Wl,-Map,$(notdir $@).map
@@ -34,12 +37,14 @@ LDFLAGS	=	-g $(MACHDEP) -Wl,-Map,$(notdir $@).map
 # any extra libraries we wish to link with the project
 #---------------------------------------------------------------------------------
 LIBS	:=	-lfat -lwiikeyboard -lasnd -lwiiuse -lbte -logc -lm
+LIBS	:=	-lwiiupdate $(LIBS)
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing
 # include and lib
 #---------------------------------------------------------------------------------
 LIBDIRS	:=	$(CURDIR)/libinput-wii
+LIBDIRS	+=	$(CURDIR)/libwiiupdate
 
 #---------------------------------------------------------------------------------
 # no real need to edit anything past this point unless you need to add additional
@@ -107,6 +112,11 @@ export OUTPUT	:=	$(CURDIR)/$(TARGET)
 $(BUILD):
 	@[ -d $@ ] || mkdir -p $@
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
+
+$(BUILD): libwiiupdate-lib
+.PHONY: libwiiupdate-lib
+libwiiupdate-lib:
+	@$(MAKE) --no-print-directory -C $(CURDIR)/libwiiupdate
 
 #---------------------------------------------------------------------------------
 clean:

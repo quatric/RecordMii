@@ -12,6 +12,7 @@
 #include <unistd.h>
 #include <wiiuse/wpad.h>
 #include <input_wii.h>
+#include <wiiupdate.h>
 
 #include "playback.h"
 #include "wav.h"
@@ -226,6 +227,12 @@ static void draw_meter(int level)
 	printf("]");
 }
 
+static u32 update_buttons(void)
+{
+	INPUT_Update();
+	return INPUT_ButtonsDown();
+}
+
 int main(int argc, char **argv)
 {
 	const u8 *firmware;
@@ -241,9 +248,6 @@ int main(int argc, char **argv)
 	u32 captured = 0;
 	char path[64] = "";
 	s32 ret;
-
-	(void)argc;
-	(void)argv;
 
 	video_init();
 
@@ -264,6 +268,14 @@ int main(int argc, char **argv)
 	}
 
 	mkdir(REC_DIR, 0777);
+
+	/* One update check at boot: B skips it, failures are silent. */
+	WIIUPDATE_SetAppPath(argc > 0 ? argv[0] : NULL);
+	if (WIIUPDATE_CheckConsole("quatric", "RecordMii", APP_VERSION, update_buttons) == WIIUPDATE_UPDATED) {
+		INPUT_Shutdown();
+		return 0;
+	}
+	printf("\n");
 
 	if (!PB_Init())
 		printf("Audio init failed; playback disabled.\n");
