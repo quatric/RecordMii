@@ -1,5 +1,7 @@
 # RecordMii
 
+**Version:** 0.2 · **Coder:** quatric
+
 **Work in progress — untested on real hardware.** See Caveats below before
 relying on this for anything.
 
