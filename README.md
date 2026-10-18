@@ -19,6 +19,8 @@ make
 
 Needs devkitPPC + libogc + libfat (`dkp-pacman -S wii-dev`).
 
+`make` also writes `boot-xz.dol`, the same program packed into a self-extracting `.dol` a fraction of the size; copy it to the SD card as `boot.dol`. The first build downloads and builds [dolxz](https://github.com/FIX94/dolxz), which needs a host C compiler and liblzma (Debian/Ubuntu: `apt-get install liblzma-dev pkg-config`; macOS: `brew install xz`). `make NO_DOLXZ=1` skips this and leaves only the plain `boot.dol`.
+
 ## Installing
 
 Copy to the SD card:
