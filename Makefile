@@ -17,7 +17,7 @@ include $(DEVKITPPC)/wii_rules
 #---------------------------------------------------------------------------------
 TARGET		:=	boot
 BUILD		:=	build
-SOURCES		:=	source libinput-wii/source
+SOURCES		:=	source libwiiinput/source
 DATA		:=	data
 INCLUDES	:=	source
 
@@ -43,7 +43,7 @@ LIBS	:=	-lwiiupdate $(LIBS)
 # list of directories containing libraries, this must be the top level containing
 # include and lib
 #---------------------------------------------------------------------------------
-LIBDIRS	:=	$(CURDIR)/libinput-wii
+LIBDIRS	:=	$(CURDIR)/libwiiinput
 LIBDIRS	+=	$(CURDIR)/libwiiupdate
 
 #---------------------------------------------------------------------------------
