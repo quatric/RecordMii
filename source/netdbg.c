@@ -16,6 +16,7 @@
 #include <ogc/lwp.h>
 #include <ogc/mutex.h>
 
+#include "escape.h"
 #include "netdbg.h"
 #include "wiispeak.h"
 
@@ -250,12 +251,13 @@ static const char HELP[] =
 	"  swap 0|1             byte-swap samples\n"
 	"  pcm <ms>             what gets recorded: BIN <bytes> <rate>\n"
 	"  ls <dir> | get <path>\n"
+	"  kill                 back to the loader now, no cleanup\n"
 	"Handed to the main loop:\n"
 	"  status\n"
 	"  gain 0-3 | freq 8|11|16 | sp 0|1 | mute 0|1\n"
 	"  tone <hz> <ms> [vol 0-255] | tone off\n"
 	"  rec start|stop | play [path] | stop\n"
-	"  exit\n";
+	"  exit                 clean exit; forced after 5 s if it stalls\n";
 
 static void cmd_log(s32 fd, bool all, u32 *cursor)
 {
@@ -505,6 +507,10 @@ static void handle(s32 fd, char *line, u32 *log_cursor)
 	} else if (!strcmp(line, "swap")) {
 		WS_SetSwap(atoi(args) != 0);
 		sendf(fd, "OK swap %d\n", (int)WS_GetSwap());
+	} else if (!strcmp(line, "kill")) {
+		sendf(fd, "OK leaving\n");
+		usleep(100 * 1000);
+		ESC_Request();
 	} else if (!strcmp(line, "ls")) {
 		cmd_ls(fd, *args ? args : "sd:/wiispeak");
 	} else if (!strcmp(line, "get")) {
@@ -513,6 +519,9 @@ static void handle(s32 fd, char *line, u32 *log_cursor)
 		/* Everything else belongs to the main loop. */
 		if (*args)
 			args[-1] = ' ';
+		/* Leave even if the main loop never picks this up. */
+		if (!strcmp(line, "exit"))
+			ESC_Arm(8000);
 		if (mb_call(line, reply, sizeof(reply))) {
 			send_all(fd, reply, strlen(reply));
 			sendf(fd, "OK\n");

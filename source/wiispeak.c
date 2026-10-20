@@ -113,6 +113,7 @@ static u8 *ws_in_stack;
 static u8 *ws_out_stack;
 
 static u16 ws_seq;
+static bool (*ws_cancel)(void);
 
 /* Debug hooks and counters, see WS_GetStats() and WS_SetIsoTap(). */
 static ws_iso_tap ws_tap;
@@ -335,6 +336,9 @@ static void ws_probe(void)
 
 /* The mic boots from RAM: it comes up bare and stays mute until the host
  * pushes PMIC_FIRM_DATA at it in 1 KB bulk chunks. */
+static s32 ws_start_streams(void);
+static s32 ws_select_alt1(const char *when);
+
 static s32 ws_upload_firmware(const u8 *firmware, u32 size)
 {
 	u32 sent = 0;
@@ -380,29 +384,41 @@ static s32 ws_upload_firmware(const u8 *firmware, u32 size)
 	usleep(500 * 1000);
 	(void)ws_wait_status(1, "status after upload");
 
-	/* The DSP reboots after taking the firmware and IOS fails every control
-	 * transfer with -22 until it is back.  On real hardware that takes well
-	 * over the 3 s this used to allow -- and giving up early meant the
-	 * sampler was never switched on, so the mic sent nothing at all.  We
-	 * cannot read the ready flag (single-byte reads never land on this
-	 * stack), so probe readiness by retrying a real command. */
+	/* The SDK selects alt setting 1 again here, after the upload (PMICOpen
+	 * steps 5-6): the mic comes back from its firmware reboot in alt 0,
+	 * which has no endpoints, and refuses every vendor request (-22 from
+	 * IOS) until it is switched.  We cannot read the ready flag (single-byte
+	 * reads never land on this stack), so probe with a real command. */
 	{
-		int tries;
+		int ms;
 
-		for (tries = 0; tries < 300; tries++) {
+		ws_select_alt1("after upload");
+
+		for (ms = 0; ms < 30000; ms += 100) {
 			ret = ws_set(REG_SAMPLER_FREQ, WS_FREQ_16KHZ, 0);
 			if (ret >= 0) {
-				printf("  ready after %d ms\n", tries * 100);
+				printf("  ready after %d ms\n", ms);
 				return WS_OK;
 			}
-			if (tries % 20 == 19)
+			if (ws_cancel && ws_cancel())
+				return WS_ECANCEL;
+
+			/* Fallbacks, logged so the console shows which one it took. */
+			if (ms == 2000)
+				ws_select_alt1("retry");
+			if (ms == 4000) {
+				printf("  starting the streams early\n");
+				ws_start_streams();
+			}
+			if (ms % 2000 == 1900)
 				printf("  waiting for the mic... (%d)\n", (int)ret);
 			usleep(100 * 1000);
 		}
 		printf("  device never accepted a command (%d)\n", (int)ret);
 	}
 
-	return WS_ETIMEOUT;
+	/* Carry on regardless, so the debug console can still poke at it. */
+	return WS_OK;
 	return WS_OK;
 }
 
@@ -856,6 +872,7 @@ s32 WS_Open(const void *firmware, u32 firmware_size)
 	return WS_OK;
 
 fail:
+	WS_Stop();
 	USB_CloseDevice(&ws_fd);
 	ws_fd = -1;
 	ws_opened = false;
@@ -926,14 +943,47 @@ s32 WS_GetSendLevel(u16 *level)
 	return ws_command(REG_SP_STATE | REG_READ, SP_SOUT, 0, NULL, level);
 }
 
+static s32 ws_select_alt1(const char *when)
+{
+	s32 ret = USB_SetAlternativeInterface(ws_fd, 0, 1);
+
+	if (ret < 0)
+		ret = USB_WriteCtrlMsg(ws_fd, USB_CTRLTYPE_DIR_HOST2DEVICE |
+		                       USB_CTRLTYPE_TYPE_STANDARD |
+		                       USB_CTRLTYPE_REC_INTERFACE,
+		                       USB_REQ_SETINTERFACE, 1, 0, 0, NULL);
+	printf("  set alt 1 (%s): %d\n", when, (int)ret);
+	return ret;
+}
+
+static s32 ws_start_streams(void)
+{
+	if (ws_running)
+		return WS_OK;
+
+	ws_running = true;
+
+	if (LWP_CreateThread(&ws_in_thread, ws_in_worker, NULL, ws_in_stack,
+	                     STACKSIZE, 80) < 0) {
+		ws_running = false;
+		return WS_ENOMEM;
+	}
+
+	if (LWP_CreateThread(&ws_out_thread, ws_out_worker, NULL, ws_out_stack,
+	                     STACKSIZE, 80) < 0) {
+		/* The IN stream alone still records; just skip the reference feed. */
+		ws_out_thread = LWP_THREAD_NULL;
+	}
+
+	return WS_OK;
+}
+
 s32 WS_Start(void)
 {
 	s32 ret;
 
 	if (!ws_opened)
 		return WS_ESTATE;
-	if (ws_running)
-		return WS_OK;
 
 	/* Write-only: don't gate startup on a control-IN that might block, and
 	 * let the on-screen sample counter be the real test of whether the mic
@@ -950,19 +1000,10 @@ s32 WS_Start(void)
 		printf("  sampler on: %d\n", (int)ret);
 	}
 
-	ws_running = true;
-
-	if (LWP_CreateThread(&ws_in_thread, ws_in_worker, NULL, ws_in_stack,
-	                     STACKSIZE, 80) < 0) {
-		ws_running = false;
+	/* The streams may already be running, started early during boot. */
+	if (ws_start_streams() < 0) {
 		ws_set(REG_SAMPLER_STATE, 0, 0);
 		return WS_ENOMEM;
-	}
-
-	if (LWP_CreateThread(&ws_out_thread, ws_out_worker, NULL, ws_out_stack,
-	                     STACKSIZE, 80) < 0) {
-		/* The IN stream alone still records; just skip the reference feed. */
-		ws_out_thread = LWP_THREAD_NULL;
 	}
 
 	return WS_OK;
@@ -1051,4 +1092,9 @@ bool WS_GetSwap(void)
 int WS_GetLayout(void)
 {
 	return ws_layout;
+}
+
+void WS_SetCancel(bool (*cancel)(void))
+{
+	ws_cancel = cancel;
 }

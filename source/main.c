@@ -17,6 +17,7 @@
 #include <input_wii.h>
 #include <wiiupdate.h>
 
+#include "escape.h"
 #include "netdbg.h"
 #include "playback.h"
 #include "wav.h"
@@ -190,16 +191,17 @@ static bool fail_command(const char *line, char *reply, size_t size)
 	return false;
 }
 
-static void wait_for_home(void)
+static void __attribute__((noreturn)) wait_for_home(void)
 {
 	printf("\nPress HOME to exit.\n");
 	while (!quit) {
 		INPUT_Update();
 		if (INPUT_ButtonsDown() & WPAD_BUTTON_HOME)
-			return;
+			break;
 		NDBG_Poll(fail_command);
 		VIDEO_WaitVSync();
 	}
+	ESC_Now();
 }
 
 /* Returns the firmware and its size.  *owned says whether the caller has to
@@ -318,10 +320,25 @@ static void draw_meter(int level)
 	printf("]");
 }
 
-static u32 update_buttons(void)
+/* Before the main loop there is nothing worth tidying, so HOME leaves at
+ * once wherever startup happens to be. */
+static bool startup_home(void)
 {
 	INPUT_Update();
-	return INPUT_ButtonsDown();
+	if (INPUT_ButtonsDown() & WPAD_BUTTON_HOME)
+		ESC_Request();
+	return false;
+}
+
+static u32 update_buttons(void)
+{
+	u32 down;
+
+	INPUT_Update();
+	down = INPUT_ButtonsDown();
+	if (down & WPAD_BUTTON_HOME)
+		ESC_Request();
+	return down;
 }
 
 static void start_recording(void)
@@ -477,6 +494,7 @@ int main(int argc, char **argv)
 	s32 ret;
 
 	video_init();
+	ESC_Init();
 	NDBG_HookStdout();
 
 	printf("\x1b[2;0H");
@@ -488,11 +506,12 @@ int main(int argc, char **argv)
 
 	/* Buttons only: no IR pointer and no mouse. */
 	INPUT_InitEx(INPUT_INIT_NO_POINTER | INPUT_INIT_NO_MOUSE);
+	ESC_WpadReady();
+	WS_SetCancel(startup_home);
 
 	if (!fatInitDefault()) {
 		printf("Could not mount the SD card.\n");
 		wait_for_home();
-		return 1;
 	}
 
 	mkdir(REC_DIR, 0777);
@@ -501,7 +520,7 @@ int main(int argc, char **argv)
 	WIIUPDATE_SetAppPath(argc > 0 ? argv[0] : NULL);
 	if (WIIUPDATE_CheckConsole("quatric", "RecordMii", APP_VERSION, update_buttons) == WIIUPDATE_UPDATED) {
 		INPUT_Shutdown();
-		return 0;
+		ESC_Now();
 	}
 	printf("\n");
 
@@ -522,17 +541,15 @@ int main(int argc, char **argv)
 		printf("copy the result to:\n  %s\n", FIRMWARE_PATHS[0]);
 		printf("\nOr build it in with: make firmware SDK=<pmic.a>\n");
 		wait_for_home();
-		return 1;
 	}
 
 	pump = memalign(32, PUMP_SAMPLES * sizeof(s16));
 	if (!pump) {
 		printf("Out of memory.\n");
 		wait_for_home();
-		return 1;
 	}
 
-	printf("Opening the Wii Speak...\n");
+	printf("Opening the Wii Speak... (HOME or RESET exits)\n");
 	ret = WS_Open(firmware, firmware_size);
 	if (firmware_owned)
 		free((void *)firmware);
@@ -543,13 +560,14 @@ int main(int argc, char **argv)
 			WS_Diagnose();
 			printf("\nIf the mic is not listed, try the other USB port.\n");
 		}
+		else if (ret == WS_ECANCEL)
+			ESC_Now();
 		else if (ret == WS_EFIRMWARE)
 			printf("The mic did not accept the firmware (it never\n"
 			       "reported ready). Is pmic_firm.bin intact?\n");
 		else
 			printf("WS_Open failed: %d\n", (int)ret);
 		wait_for_home();
-		return 1;
 	}
 
 	printf("cfg gain %d\n", (int)WS_SetGain(gain_idx));
@@ -563,7 +581,6 @@ int main(int argc, char **argv)
 		printf("WS_Start failed: %d\n", (int)ret);
 		WS_Close();
 		wait_for_home();
-		return 1;
 	}
 
 	/* Clear the boot log off the screen; the debug console keeps it. */
@@ -690,8 +707,10 @@ int main(int argc, char **argv)
 	}
 
 	/* Each step reports itself, on screen and to the debug log, so a hang
-	 * on the way out shows exactly where. */
-	printf("\x1b[2J\x1b[2;0HExiting...\n");
+	 * on the way out shows exactly where -- and the watchdog leaves anyway
+	 * if it takes too long. */
+	ESC_Arm(5000);
+	printf("\x1b[2J\x1b[2;0HExiting... (RESET forces it)\n");
 
 	if (recording) {
 		stop_recording();
@@ -714,6 +733,8 @@ int main(int argc, char **argv)
 
 	NDBG_Stop();
 	printf("exit: network down, returning to loader\n");
-	VIDEO_WaitVSync();
-	return 0;
+
+	/* Not `return`: libogc's exit stops the thread system first, watchdog
+	 * included, so if that hung nothing could rescue it. */
+	ESC_Now();
 }

@@ -32,9 +32,14 @@
 #define WS_EFIRMWARE  -4
 #define WS_ENOMEM     -5
 #define WS_ETIMEOUT   -6
+#define WS_ECANCEL    -7
 
 /* Returns the sample rate in Hz for a WS_FREQ_* constant. */
 u32 WS_FreqToHz(u16 freq);
+
+/* Polled during WS_Open()'s long waits; returning true abandons the open
+ * with WS_ECANCEL. */
+void WS_SetCancel(bool (*cancel)(void));
 
 /* Opens the device and boots it with `firmware` (PMIC_FIRM_DATA from the
  * SDK's pmic.a -- see tools/extract_pmic_firmware.py).  The mic ignores every
