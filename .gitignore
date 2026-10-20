@@ -6,3 +6,5 @@ boot-xz.dol
 pmic_firm.bin
 data/pmic_firm.bin
 .dolxz/
+wsdbg-out/
+__pycache__/

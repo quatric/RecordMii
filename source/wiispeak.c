@@ -114,6 +114,23 @@ static u8 *ws_out_stack;
 
 static u16 ws_seq;
 
+/* Debug hooks and counters, see WS_GetStats() and WS_SetIsoTap(). */
+static ws_iso_tap ws_tap;
+static ws_stats ws_st;
+static volatile int ws_layout = WS_LAYOUT_AUTO;
+static volatile bool ws_swap;
+
+/* One in-flight asynchronous transfer.  A transfer still pending when its
+ * worker gives up keeps its DMA buffer alive, so WS_Close must not free it. */
+typedef struct {
+	volatile bool done;
+	volatile s32 res;
+} ws_xfer;
+
+static ws_xfer ws_in_x, ws_out_x; /* static: a late completion writes here */
+static volatile bool ws_in_pending;
+static volatile bool ws_out_pending;
+
 u32 WS_FreqToHz(u16 freq)
 {
 	switch (freq) {
@@ -225,6 +242,11 @@ out:
 static s32 ws_set(u8 reg, u16 arg1, u16 arg2)
 {
 	return ws_command(reg, arg1, arg2, NULL, NULL);
+}
+
+s32 WS_RawCommand(u8 reg, u16 arg1, u16 arg2, u16 *out1, u16 *out2)
+{
+	return ws_command(reg, arg1, arg2, out1, out2);
 }
 
 /* ---- boot ---------------------------------------------------------------- */
@@ -358,45 +380,33 @@ static s32 ws_upload_firmware(const u8 *firmware, u32 size)
 	usleep(500 * 1000);
 	(void)ws_wait_status(1, "status after upload");
 
-	/* The DSP reboots after taking the firmware and NAKs control transfers
-	 * until it is back -- which is why the first command times out.  We
+	/* The DSP reboots after taking the firmware and IOS fails every control
+	 * transfer with -22 until it is back.  On real hardware that takes well
+	 * over the 3 s this used to allow -- and giving up early meant the
+	 * sampler was never switched on, so the mic sent nothing at all.  We
 	 * cannot read the ready flag (single-byte reads never land on this
-	 * stack), so probe readiness by retrying a real command until the
-	 * device answers it. */
+	 * stack), so probe readiness by retrying a real command. */
 	{
 		int tries;
 
-		for (tries = 0; tries < 30; tries++) {
+		for (tries = 0; tries < 300; tries++) {
 			ret = ws_set(REG_SAMPLER_FREQ, WS_FREQ_16KHZ, 0);
 			if (ret >= 0) {
-				printf("  ready after %d tries\n", tries + 1);
+				printf("  ready after %d ms\n", tries * 100);
 				return WS_OK;
 			}
+			if (tries % 20 == 19)
+				printf("  waiting for the mic... (%d)\n", (int)ret);
 			usleep(100 * 1000);
 		}
 		printf("  device never accepted a command (%d)\n", (int)ret);
 	}
 
+	return WS_ETIMEOUT;
 	return WS_OK;
 }
 
 /* ---- transfer threads ---------------------------------------------------- */
-
-static u32 ws_iso_bytes(s32 ret, const u16 *sizes, u32 count, u32 limit)
-{
-	u32 total = 0;
-	u32 i;
-
-	/* IOS reports the transferred length either as the ioctl result or by
-	 * rewriting the per-packet size table; accept whichever looks sane. */
-	if (ret > 0 && (u32)ret <= limit)
-		return (u32)ret;
-
-	for (i = 0; i < count; i++)
-		total += sizes[i];
-
-	return total > limit ? limit : total;
-}
 
 static void ws_push(const s16 *samples, u32 count)
 {
@@ -417,32 +427,150 @@ static void ws_push(const s16 *samples, u32 count)
 	LWP_MutexUnlock(ws_ring_lock);
 }
 
+static s32 ws_xfer_cb(s32 result, void *arg)
+{
+	ws_xfer *x = arg;
+
+	x->res = result;
+	x->done = true;
+	return 0;
+}
+
+/* Waits for a transfer for as long as streaming is on.  Isochronous transfers
+ * complete every frame on working hardware, but a synchronous call that never
+ * returns would leave WS_Stop() joining a thread forever -- which is how the
+ * app used to hang on exit.  Returns false if streaming stopped first. */
+static bool ws_xfer_wait(ws_xfer *x)
+{
+	while (!x->done) {
+		if (!ws_running)
+			return false;
+		usleep(1000);
+	}
+	return true;
+}
+
+/* Copies the audio out of one IN transfer, returning the sample count.
+ *
+ * IOS lays isochronous packets out at their requested sizes, one after the
+ * other, and writes each packet's actual length back into the size table.
+ * A real Wii Speak sends short packets (16 of the 32 bytes asked for), so
+ * the audio sits in the front half of every 32-byte slot with stale bytes
+ * between -- reading `ret` bytes from the start of the buffer, as this used
+ * to, interleaves real samples with garbage. */
+static u32 ws_extract(s32 ret, s16 *out)
+{
+	const u8 *src = ws_in_buf;
+	u8 *dst = (u8 *)out;
+	u32 bytes = 0;
+	u32 sum = 0;
+	bool rewritten = false;
+	int layout = ws_layout;
+	u32 i;
+
+	for (i = 0; i < ISO_IN_PACKETS; i++) {
+		sum += ws_in_sizes[i];
+		if (ws_in_sizes[i] != ISO_IN_PKTSIZE)
+			rewritten = true;
+	}
+
+	if (layout == WS_LAYOUT_AUTO)
+		layout = rewritten ? WS_LAYOUT_SLOTS : WS_LAYOUT_PACKED;
+
+	/* An empty transfer is just that.  This used to fall back to the size
+	 * table, which IOS leaves untouched, and so recorded 256 stale bytes
+	 * per transfer whenever the mic was not actually sampling. */
+	if (ret <= 0 && !rewritten)
+		return 0;
+
+	if (layout == WS_LAYOUT_SLOTS) {
+		for (i = 0; i < ISO_IN_PACKETS; i++) {
+			u32 n = ws_in_sizes[i];
+			if (n > ISO_IN_PKTSIZE)
+				n = ISO_IN_PKTSIZE;
+			memcpy(dst + bytes, src + i * ISO_IN_PKTSIZE, n);
+			bytes += n;
+		}
+	} else {
+		bytes = (ret > 0 && (u32)ret <= ISO_IN_BYTES) ? (u32)ret
+		      : (sum <= ISO_IN_BYTES ? sum : ISO_IN_BYTES);
+		if (ret <= 0)
+			bytes = 0;
+		memcpy(dst, src, bytes);
+	}
+
+	ws_st.last_layout = layout;
+	bytes &= ~1u;
+
+	/* The mic is assumed to send big-endian samples, which is host order
+	 * on PowerPC and what Dolphin's emulated device produces.  `swap`
+	 * exists to test that assumption on real hardware. */
+	if (ws_swap) {
+		for (i = 0; i < bytes; i += 2) {
+			u8 t = dst[i];
+			dst[i] = dst[i + 1];
+			dst[i + 1] = t;
+		}
+	}
+
+	return bytes / sizeof(s16);
+}
+
 static void *ws_in_worker(void *arg)
 {
+	static s16 samples[ISO_IN_BYTES / sizeof(s16)];
+	ws_xfer *x = &ws_in_x;
+
 	(void)arg;
 
 	while (ws_running) {
 		s32 ret;
-		u32 bytes, i;
+		u32 n, i;
 
 		for (i = 0; i < ISO_IN_PACKETS; i++)
 			ws_in_sizes[i] = ISO_IN_PKTSIZE;
+		/* Poison the buffer so stale data is recognisable in a capture. */
+		memset(ws_in_buf, 0xEE, ISO_IN_BYTES);
+		DCFlushRange(ws_in_buf, ISO_IN_BYTES);
+		DCFlushRange(ws_in_sizes, 32);
 
-		ret = USB_ReadIsoMsg(ws_fd, EP_AUDIO_IN, ISO_IN_PACKETS,
-		                     ws_in_sizes, ws_in_buf);
+		x->done = false;
+		ret = USB_ReadIsoMsgAsync(ws_fd, EP_AUDIO_IN, ISO_IN_PACKETS,
+		                          ws_in_sizes, ws_in_buf, ws_xfer_cb, x);
 		if (ret < 0) {
-			if (!ws_running)
-				break;
+			ws_st.in_errors++;
+			ws_st.last_in_ret = ret;
 			usleep(1000);
 			continue;
 		}
 
-		bytes = ws_iso_bytes(ret, ws_in_sizes, ISO_IN_PACKETS, ISO_IN_BYTES);
-		if (bytes >= sizeof(s16)) {
-			/* The mic sends big-endian 16-bit mono, which is already
-			 * host order on PowerPC. */
-			ws_push((const s16 *)ws_in_buf, bytes / sizeof(s16));
+		ws_in_pending = true;
+		if (!ws_xfer_wait(x))
+			break;
+		ws_in_pending = false;
+
+		ret = x->res;
+		DCInvalidateRange(ws_in_buf, ISO_IN_BYTES);
+		DCInvalidateRange(ws_in_sizes, 32);
+
+		ws_st.in_calls++;
+		ws_st.last_in_ret = ret;
+		for (i = 0; i < ISO_IN_PACKETS; i++)
+			ws_st.last_sizes[i] = ws_in_sizes[i];
+
+		if (ws_tap)
+			ws_tap(ret, ws_in_sizes, ws_in_buf);
+
+		if (ret < 0) {
+			ws_st.in_errors++;
+			usleep(1000);
+			continue;
 		}
+
+		n = ws_extract(ret, samples);
+		ws_st.in_samples += n;
+		if (n > 0)
+			ws_push(samples, n);
 	}
 
 	return NULL;
@@ -452,18 +580,37 @@ static void *ws_in_worker(void *arg)
  * sampling; a recorder has nothing to play back, so it feeds silence. */
 static void *ws_out_worker(void *arg)
 {
+	ws_xfer *x = &ws_out_x;
+
 	(void)arg;
 
 	while (ws_running) {
 		u32 i;
+		s32 ret;
 
 		for (i = 0; i < ISO_OUT_PACKETS; i++)
 			ws_out_sizes[i] = ISO_OUT_PKTSIZE;
+		DCFlushRange(ws_out_sizes, 32);
 
-		if (USB_WriteIsoMsg(ws_fd, EP_AUDIO_OUT, ISO_OUT_PACKETS,
-		                    ws_out_sizes, ws_out_buf) < 0) {
-			if (!ws_running)
-				break;
+		x->done = false;
+		ret = USB_WriteIsoMsgAsync(ws_fd, EP_AUDIO_OUT, ISO_OUT_PACKETS,
+		                           ws_out_sizes, ws_out_buf, ws_xfer_cb, x);
+		if (ret < 0) {
+			ws_st.out_errors++;
+			ws_st.last_out_ret = ret;
+			usleep(1000);
+			continue;
+		}
+
+		ws_out_pending = true;
+		if (!ws_xfer_wait(x))
+			break;
+		ws_out_pending = false;
+
+		ws_st.out_calls++;
+		ws_st.last_out_ret = x->res;
+		if (x->res < 0) {
+			ws_st.out_errors++;
 			usleep(1000);
 		}
 	}
@@ -478,10 +625,17 @@ static void ws_free_buffers(void)
 	free(ws_cmd);       ws_cmd = NULL;
 	free(ws_status);    ws_status = NULL;
 	free(ws_chunk);     ws_chunk = NULL;
-	free(ws_in_buf);    ws_in_buf = NULL;
-	free(ws_out_buf);   ws_out_buf = NULL;
-	free(ws_in_sizes);  ws_in_sizes = NULL;
-	free(ws_out_sizes); ws_out_sizes = NULL;
+	/* A transfer that never completed may still land in these. */
+	if (!ws_in_pending) {
+		free(ws_in_buf);
+		free(ws_in_sizes);
+	}
+	if (!ws_out_pending) {
+		free(ws_out_buf);
+		free(ws_out_sizes);
+	}
+	ws_in_buf = ws_out_buf = NULL;
+	ws_in_sizes = ws_out_sizes = NULL;
 	free(ws_in_stack);  ws_in_stack = NULL;
 	free(ws_out_stack); ws_out_stack = NULL;
 	free(ws_ring);      ws_ring = NULL;
@@ -716,8 +870,11 @@ s32 WS_Close(void)
 
 	WS_Stop();
 
-	USB_WriteCtrlMsg(ws_fd, REQTYPE_VENDOR_OUT, REQ_RESET, 0, 0, 0, NULL);
-	USB_CloseDevice(&ws_fd);
+	/* The synchronous form never times out, and this is the last thing
+	 * between HOME and the Homebrew Channel. */
+	printf("  ws: reset %d\n",
+	       (int)ws_ctrl(REQTYPE_VENDOR_OUT, REQ_RESET, 0, 0, 0, NULL, 500));
+	printf("  ws: close %d\n", (int)USB_CloseDevice(&ws_fd));
 	ws_fd = -1;
 	ws_opened = false;
 
@@ -781,8 +938,17 @@ s32 WS_Start(void)
 	/* Write-only: don't gate startup on a control-IN that might block, and
 	 * let the on-screen sample counter be the real test of whether the mic
 	 * is streaming. */
-	ret = ws_set(REG_SAMPLER_STATE, 1, 0);
-	printf("  sampler on: %d\n", (int)ret);
+	{
+		int tries;
+
+		for (tries = 0; tries < 20; tries++) {
+			ret = ws_set(REG_SAMPLER_STATE, 1, 0);
+			if (ret >= 0)
+				break;
+			usleep(100 * 1000);
+		}
+		printf("  sampler on: %d\n", (int)ret);
+	}
 
 	ws_running = true;
 
@@ -809,9 +975,10 @@ s32 WS_Stop(void)
 
 	ws_running = false;
 
-	/* Stopping the sampler unblocks any transfer still in flight. */
-	ws_set(REG_SAMPLER_STATE, 0, 0);
+	printf("  ws: sampler off %d\n", (int)ws_set(REG_SAMPLER_STATE, 0, 0));
 
+	/* The workers poll ws_running while they wait, so these return
+	 * promptly even if a transfer never completes. */
 	if (ws_in_thread != LWP_THREAD_NULL) {
 		LWP_JoinThread(ws_in_thread, NULL);
 		ws_in_thread = LWP_THREAD_NULL;
@@ -820,6 +987,9 @@ s32 WS_Stop(void)
 		LWP_JoinThread(ws_out_thread, NULL);
 		ws_out_thread = LWP_THREAD_NULL;
 	}
+	printf("  ws: threads joined (in %s, out %s)\n",
+	       ws_in_pending ? "pending" : "idle",
+	       ws_out_pending ? "pending" : "idle");
 
 	return WS_OK;
 }
@@ -850,4 +1020,35 @@ u32 WS_Available(void)
 u32 WS_Dropped(void)
 {
 	return ws_drops;
+}
+
+void WS_GetStats(ws_stats *out)
+{
+	if (out)
+		*out = ws_st;
+}
+
+void WS_SetIsoTap(ws_iso_tap tap)
+{
+	ws_tap = tap;
+}
+
+void WS_SetLayout(int layout)
+{
+	ws_layout = layout;
+}
+
+void WS_SetSwap(bool swap)
+{
+	ws_swap = swap;
+}
+
+bool WS_GetSwap(void)
+{
+	return ws_swap;
+}
+
+int WS_GetLayout(void)
+{
+	return ws_layout;
 }

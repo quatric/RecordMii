@@ -1,8 +1,11 @@
 /* Wii Speak Recorder -- records the Wii Speak to WAV files on the SD card. */
 
+#include <asndlib.h>
 #include <fat.h>
 #include <gccore.h>
 #include <malloc.h>
+#include <math.h>
+#include <ogc/lwp_watchdog.h>
 #include <ogc/ios.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,6 +17,7 @@
 #include <input_wii.h>
 #include <wiiupdate.h>
 
+#include "netdbg.h"
 #include "playback.h"
 #include "wav.h"
 #include "wiispeak.h"
@@ -43,6 +47,80 @@ static GXRModeObj *rmode;
 
 static const u16 GAIN_DB[] = { 0, 15, 30, 36 };
 static const u16 FREQS[] = { WS_FREQ_8KHZ, WS_FREQ_11KHZ, WS_FREQ_16KHZ };
+
+/* App state, at file scope so the debug console can drive it. */
+static wav_t wav;
+static bool recording;
+static bool sp_on;
+static bool muted;
+static bool audio_ok;
+static bool quit;
+static int gain_idx = 2;  /* 30 dB */
+static int freq_idx = 2;  /* 16 kHz */
+static char path[64];
+
+/* ---- test tone ------------------------------------------------------------ */
+
+/* One second at 48 kHz holds a whole number of periods of any integer
+ * frequency, so it loops without a click. */
+#define TONE_RATE 48000
+
+static s16 *tone_buf;
+static s32 tone_voice = -1;
+static u64 tone_end;
+
+static void tone_stop(void)
+{
+	if (tone_voice >= 0) {
+		ASND_StopVoice(tone_voice);
+		tone_voice = -1;
+	}
+}
+
+static bool tone_start(u32 hz, u32 ms, u32 vol)
+{
+	u32 i;
+
+	if (!audio_ok || hz == 0 || hz >= TONE_RATE / 2)
+		return false;
+
+	if (!tone_buf) {
+		tone_buf = memalign(32, TONE_RATE * sizeof(s16));
+		if (!tone_buf)
+			return false;
+	}
+
+	tone_stop();
+
+	for (i = 0; i < TONE_RATE; i++)
+		tone_buf[i] = (s16)(sinf(2.0f * (float)M_PI * (float)((u64)hz * i % TONE_RATE)
+		                         / TONE_RATE) * 30000.0f);
+	DCFlushRange(tone_buf, TONE_RATE * sizeof(s16));
+
+	tone_voice = ASND_GetFirstUnusedVoice();
+	if (tone_voice == SND_INVALID) {
+		tone_voice = -1;
+		return false;
+	}
+
+	if (vol > 255)
+		vol = 255;
+	if (ASND_SetInfiniteVoice(tone_voice, VOICE_MONO_16BIT, TONE_RATE, 0,
+	                          tone_buf, TONE_RATE * sizeof(s16),
+	                          (s32)vol, (s32)vol) != SND_OK) {
+		tone_voice = -1;
+		return false;
+	}
+
+	tone_end = gettime() + millisecs_to_ticks(ms);
+	return true;
+}
+
+static void tone_pump(void)
+{
+	if (tone_voice >= 0 && gettime() >= tone_end)
+		tone_stop();
+}
 
 static void video_init(void)
 {
@@ -100,13 +178,26 @@ static void ensure_usb_ios(void)
 	       (int)IOS_GetVersion());
 }
 
+/* Only `exit` makes sense once startup has failed. */
+static bool fail_command(const char *line, char *reply, size_t size)
+{
+	if (!strcmp(line, "exit")) {
+		quit = true;
+		snprintf(reply, size, "exiting\n");
+		return true;
+	}
+	snprintf(reply, size, "startup failed; only `exit` works");
+	return false;
+}
+
 static void wait_for_home(void)
 {
 	printf("\nPress HOME to exit.\n");
-	while (1) {
+	while (!quit) {
 		INPUT_Update();
 		if (INPUT_ButtonsDown() & WPAD_BUTTON_HOME)
 			return;
+		NDBG_Poll(fail_command);
 		VIDEO_WaitVSync();
 	}
 }
@@ -233,23 +324,160 @@ static u32 update_buttons(void)
 	return INPUT_ButtonsDown();
 }
 
+static void start_recording(void)
+{
+	PB_Stop();
+	next_filename(path, sizeof(path));
+	if (WAV_Open(&wav, path, WS_FreqToHz(FREQS[freq_idx])))
+		recording = true;
+}
+
+static void stop_recording(void)
+{
+	WAV_Close(&wav);
+	recording = false;
+}
+
+static int freq_index(u32 khz)
+{
+	switch (khz) {
+	case 8:  return 0;
+	case 11: return 1;
+	case 16: return 2;
+	default: return -1;
+	}
+}
+
+/* Main-loop half of the debug console; see netdbg.h. */
+static bool debug_command(const char *line, char *reply, size_t size)
+{
+	char cmd[16] = "", arg[64] = "";
+	unsigned a = 0, b = 0, c = 255;
+
+	sscanf(line, "%15s %63[^\n]", cmd, arg);
+
+	if (!strcmp(cmd, "status")) {
+		u16 lvl = 0, fq = 0;
+		s32 r1 = WS_GetSendLevel(&lvl);
+		s32 r2 = WS_GetFreq(&fq);
+
+		snprintf(reply, size,
+		         "rate %u gain %u dB sp %d mute %d\n"
+		         "recording %d path %s\n"
+		         "playing %d tone %d\n"
+		         "mic freq reg %04x (ret %d) send level %u (ret %d)\n",
+		         (unsigned)WS_FreqToHz(FREQS[freq_idx]), GAIN_DB[gain_idx],
+		         sp_on, muted, recording, path[0] ? path : "-",
+		         PB_IsPlaying(), tone_voice >= 0,
+		         fq, (int)r2, lvl, (int)r1);
+		return true;
+	}
+
+	if (!strcmp(cmd, "exit")) {
+		quit = true;
+		snprintf(reply, size, "exiting\n");
+		return true;
+	}
+
+	if (!strcmp(cmd, "tone")) {
+		if (!strcmp(arg, "off")) {
+			tone_stop();
+			snprintf(reply, size, "tone off\n");
+			return true;
+		}
+		if (sscanf(arg, "%u %u %u", &a, &b, &c) < 2) {
+			snprintf(reply, size, "usage: tone <hz> <ms> [vol] | tone off");
+			return false;
+		}
+		if (!tone_start(a, b, c)) {
+			snprintf(reply, size, "could not start the tone");
+			return false;
+		}
+		snprintf(reply, size, "tone %u Hz for %u ms at %u\n", a, b,
+		         c > 255 ? 255 : c);
+		return true;
+	}
+
+	if (!strcmp(cmd, "rec")) {
+		if (!strcmp(arg, "start") && !recording)
+			start_recording();
+		else if (!strcmp(arg, "stop") && recording)
+			stop_recording();
+		snprintf(reply, size, "recording %d %s\n", recording, path);
+		return true;
+	}
+
+	if (!strcmp(cmd, "play")) {
+		const char *p = arg[0] ? arg : path;
+		if (recording || !p[0] || !PB_Start(p)) {
+			snprintf(reply, size, "cannot play %s", p[0] ? p : "(nothing)");
+			return false;
+		}
+		snprintf(reply, size, "playing %s\n", p);
+		return true;
+	}
+
+	if (!strcmp(cmd, "stop")) {
+		PB_Stop();
+		tone_stop();
+		snprintf(reply, size, "stopped\n");
+		return true;
+	}
+
+	/* Settings, refused mid-recording like their buttons. */
+	if (!strcmp(cmd, "gain") || !strcmp(cmd, "freq") ||
+	    !strcmp(cmd, "sp") || !strcmp(cmd, "mute")) {
+		s32 ret;
+
+		a = (unsigned)strtoul(arg, NULL, 10);
+		if (recording) {
+			snprintf(reply, size, "stop recording first");
+			return false;
+		}
+
+		if (!strcmp(cmd, "gain")) {
+			if (a > 3) {
+				snprintf(reply, size, "gain is 0-3");
+				return false;
+			}
+			gain_idx = (int)a;
+			ret = WS_SetGain((u16)a);
+		} else if (!strcmp(cmd, "freq")) {
+			int i = freq_index(a);
+			if (i < 0) {
+				snprintf(reply, size, "freq is 8, 11 or 16");
+				return false;
+			}
+			freq_idx = i;
+			ret = WS_SetFreq(FREQS[i]);
+		} else if (!strcmp(cmd, "sp")) {
+			sp_on = a != 0;
+			ret = WS_SetSignalProcessing(sp_on);
+		} else {
+			muted = a != 0;
+			ret = WS_SetMute(muted);
+		}
+
+		snprintf(reply, size, "%s %u -> %d\n", cmd, a, (int)ret);
+		return ret >= 0;
+	}
+
+	snprintf(reply, size, "unknown command `%s` (try help)", cmd);
+	return false;
+}
+
 int main(int argc, char **argv)
 {
 	const u8 *firmware;
 	u32 firmware_size = 0;
 	bool firmware_owned = false;
 	s16 *pump;
-	wav_t wav;
-	bool recording = false;
-	bool sp_on = false;
-	int gain_idx = 2;  /* 30 dB */
-	int freq_idx = 2;  /* 16 kHz */
 	int level = 0;
 	u32 captured = 0;
-	char path[64] = "";
 	s32 ret;
 
 	video_init();
+	NDBG_HookStdout();
 
 	printf("\x1b[2;0H");
 	printf("Wii Speak Recorder\n");
@@ -277,7 +505,12 @@ int main(int argc, char **argv)
 	}
 	printf("\n");
 
-	if (!PB_Init())
+	/* After the IOS reload and the update check, which may already have
+	 * brought the network up. */
+	NDBG_Start();
+
+	audio_ok = PB_Init();
+	if (!audio_ok)
 		printf("Audio init failed; playback disabled.\n");
 
 	firmware = load_firmware(&firmware_size, &firmware_owned);
@@ -319,10 +552,10 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	printf("cfg gain...\n");   WS_SetGain(gain_idx);
-	printf("cfg freq...\n");   WS_SetFreq(FREQS[freq_idx]);
-	printf("cfg sp...\n");     WS_SetSignalProcessing(sp_on);
-	printf("cfg mute...\n");   WS_SetMute(false);
+	printf("cfg gain %d\n", (int)WS_SetGain(gain_idx));
+	printf("cfg freq %d\n", (int)WS_SetFreq(FREQS[freq_idx]));
+	printf("cfg sp %d\n", (int)WS_SetSignalProcessing(sp_on));
+	printf("cfg mute %d\n", (int)WS_SetMute(false));
 	printf("starting...\n");
 
 	ret = WS_Start();
@@ -333,7 +566,10 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	while (1) {
+	/* Clear the boot log off the screen; the debug console keeps it. */
+	printf("\x1b[2J");
+
+	while (!quit) {
 		u32 got, held;
 		u32 pressed;
 
@@ -343,16 +579,14 @@ int main(int argc, char **argv)
 		if (pressed & WPAD_BUTTON_HOME)
 			break;
 
+		NDBG_Poll(debug_command);
+		tone_pump();
+
 		if (pressed & WPAD_BUTTON_A) {
-			if (!recording) {
-				PB_Stop();
-				next_filename(path, sizeof(path));
-				if (WAV_Open(&wav, path, WS_FreqToHz(FREQS[freq_idx])))
-					recording = true;
-			} else {
-				WAV_Close(&wav);
-				recording = false;
-			}
+			if (!recording)
+				start_recording();
+			else
+				stop_recording();
 		}
 
 		/* 1 plays back the take just recorded, 2 stops it. */
@@ -408,16 +642,18 @@ int main(int argc, char **argv)
 
 			level = meter_level(pump, got);
 			captured += got;
+			NDBG_FeedPcm(pump, got, WS_FreqToHz(FREQS[freq_idx]));
 
-			if (recording && !WAV_Write(&wav, pump, got)) {
-				WAV_Close(&wav);
-				recording = false;
-			}
+			if (recording && !WAV_Write(&wav, pump, got))
+				stop_recording();
 
 			held = held > got ? held - got : 0;
 		}
 
-		printf("\x1b[5;0H");
+		NDBG_Quiet(true);
+		printf("\x1b[2;0H");
+		printf("Wii Speak Recorder\n");
+		printf("==================\n\n");
 		printf("Rate  : %5u Hz   %s\n", (unsigned)WS_FreqToHz(FREQS[freq_idx]),
 		       recording ? "" : "(LEFT/RIGHT)   ");
 		printf("Gain  : %5u dB   %s\n", GAIN_DB[gain_idx],
@@ -446,19 +682,38 @@ int main(int argc, char **argv)
 
 		printf("Captured: %u  dropped: %u%-14s\n",
 		       (unsigned)captured, (unsigned)WS_Dropped(), "");
+		printf("Debug : %-30s\n", NDBG_Address() ? NDBG_Address() : "starting...");
 		printf("\nA: record/stop   1: play  2: stop   HOME: exit\n");
+		NDBG_Quiet(false);
 
 		VIDEO_WaitVSync();
 	}
 
-	if (recording)
-		WAV_Close(&wav);
+	/* Each step reports itself, on screen and to the debug log, so a hang
+	 * on the way out shows exactly where. */
+	printf("\x1b[2J\x1b[2;0HExiting...\n");
 
+	if (recording) {
+		stop_recording();
+		printf("exit: recording closed\n");
+	}
+
+	tone_stop();
 	PB_Shutdown();
-	WS_Stop();
+	printf("exit: audio down\n");
+
 	WS_Close();
+	printf("exit: mic closed\n");
 	free(pump);
 
-	printf("\nDone.\n");
+	INPUT_Shutdown();
+	printf("exit: input down\n");
+
+	fatUnmount("sd:");
+	printf("exit: sd unmounted\n");
+
+	NDBG_Stop();
+	printf("exit: network down, returning to loader\n");
+	VIDEO_WaitVSync();
 	return 0;
 }

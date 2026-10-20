@@ -94,6 +94,22 @@ The echo canceller defaults to **off**. It exists to subtract far-end voice
 chat audio from the mic signal, which a recorder has none of, and leaving it on
 caps the usable band near 11 kHz even when sampling at 16 kHz.
 
+## Debug console
+
+While it runs, the app listens on TCP port 4300 (the address is on screen) so
+the mic can be tested from a computer. `tools/wsdbg.py` is the client:
+
+```bash
+python3 tools/wsdbg.py <wii-ip> log --all     # everything printed since boot
+python3 tools/wsdbg.py <wii-ip> tonetest      # play a tone on the TV, check the mic hears it
+python3 tools/wsdbg.py <wii-ip> cap 2000      # raw isochronous transfers, analysed
+python3 tools/wsdbg.py <wii-ip> exitwatch     # exit remotely and watch the shutdown
+python3 tools/wsdbg.py <wii-ip> help          # every command
+```
+
+`cap` and `tonetest` decode the raw packets every plausible way (packet
+layout and byte order) and write a WAV for each to `wsdbg-out/`.
+
 ## Protocol notes
 
 Recovered from `pmic.a` (disassembled) and cross-checked against Dolphin's

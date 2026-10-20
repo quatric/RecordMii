@@ -75,4 +75,41 @@ u32 WS_Read(s16 *dst, u32 max_samples);
 u32 WS_Available(void);
 u32 WS_Dropped(void);
 
+/* ---- debugging ---------------------------------------------------------- */
+
+/* Sends one raw 10-byte register command.  With out1/out2 NULL it is a pure
+ * write; otherwise the reply is read back. */
+s32 WS_RawCommand(u8 reg, u16 arg1, u16 arg2, u16 *out1, u16 *out2);
+
+#define WS_ISO_PACKETS 8
+#define WS_ISO_PKTSIZE 32
+
+typedef struct {
+	u32 in_calls, in_errors, in_samples;
+	u32 out_calls, out_errors;
+	s32 last_in_ret, last_out_ret;
+	u16 last_sizes[WS_ISO_PACKETS];
+	int last_layout;
+} ws_stats;
+
+void WS_GetStats(ws_stats *out);
+
+/* Called from the IN worker with every completed transfer, before any
+ * interpretation: the ioctl result, the packet size table as IOS left it,
+ * and the whole WS_ISO_PACKETS * WS_ISO_PKTSIZE landing buffer. */
+typedef void (*ws_iso_tap)(s32 ret, const u16 *sizes, const u8 *buf);
+void WS_SetIsoTap(ws_iso_tap tap);
+
+/* How samples are pulled out of an IN transfer.  AUTO uses SLOTS when IOS
+ * rewrote the packet sizes and PACKED otherwise. */
+#define WS_LAYOUT_AUTO   0
+#define WS_LAYOUT_PACKED 1 /* `ret` bytes from the start of the buffer */
+#define WS_LAYOUT_SLOTS  2 /* sizes[i] bytes from each 32-byte slot */
+void WS_SetLayout(int layout);
+int WS_GetLayout(void);
+
+/* Byte-swap every sample (for testing a little-endian device). */
+void WS_SetSwap(bool swap);
+bool WS_GetSwap(void);
+
 #endif /* WIISPEAK_H */
