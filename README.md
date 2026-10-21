@@ -11,7 +11,8 @@ Homebrew voice recorder for the Wii Speak. Records 16-bit mono WAV files to
 The Wii Speak is not a USB audio class device — it is a vendor device with its
 own boot and register protocol. This app reimplements Nintendo's `PMIC` library
 ("Party Mic", the Wii Speak's development name) on top of libogc's
-`/dev/usb/oh0` wrapper.
+`/dev/usb/oh0` wrapper. The driver lives in
+[libwiiinput](https://github.com/quatric/libwiiinput) (`input_wiispeak.h`), so other apps can use the mic too.
 
 ## Download
 

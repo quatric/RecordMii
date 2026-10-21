@@ -21,7 +21,7 @@
 #include "netdbg.h"
 #include "playback.h"
 #include "wav.h"
-#include "wiispeak.h"
+#include <input_wiispeak.h>
 
 #define REC_DIR "sd:/wiispeak"
 
@@ -534,6 +534,7 @@ int main(int argc, char **argv)
 	/* Buttons only: no IR pointer and no mouse. */
 	INPUT_InitEx(INPUT_INIT_NO_POINTER | INPUT_INIT_NO_MOUSE);
 	ESC_WpadReady();
+	WS_SetLog(printf);
 	WS_SetCancel(startup_home);
 
 	/* Without a card the mic still works -- the debug console streams it --

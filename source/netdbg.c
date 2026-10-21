@@ -19,7 +19,7 @@
 
 #include "escape.h"
 #include "netdbg.h"
-#include "wiispeak.h"
+#include <input_wiispeak.h>
 
 /* ---- log ------------------------------------------------------------------ */
 
