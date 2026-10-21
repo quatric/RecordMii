@@ -139,6 +139,10 @@ typedef struct {
 /* static: a late completion writes here */
 static ws_xfer ws_in_x[ISO_SLOTS], ws_out_x[ISO_SLOTS];
 
+/* Experiment knobs, see WS_SetStreams(). */
+static int ws_in_slots = ISO_SLOTS;
+static bool ws_out_on = true;
+
 u32 WS_FreqToHz(u16 freq)
 {
 	switch (freq) {
@@ -580,7 +584,7 @@ static void *ws_in_worker(void *arg)
 
 	(void)arg;
 
-	for (slot = 0; slot < ISO_SLOTS; slot++)
+	for (slot = 0; slot < ws_in_slots; slot++)
 		ws_in_submit(slot);
 
 	slot = 0;
@@ -591,7 +595,7 @@ static void *ws_in_worker(void *arg)
 
 		if (!x->pending && ws_in_submit(slot) < 0) {
 			usleep(1000);
-			slot = (slot + 1) % ISO_SLOTS;
+			slot = (slot + 1) % ws_in_slots;
 			continue;
 		}
 
@@ -626,7 +630,7 @@ static void *ws_in_worker(void *arg)
 
 		if (ws_running)
 			ws_in_submit(slot);
-		slot = (slot + 1) % ISO_SLOTS;
+		slot = (slot + 1) % ws_in_slots;
 	}
 
 	return NULL;
@@ -1045,7 +1049,9 @@ static s32 ws_start_streams(void)
 		return WS_ENOMEM;
 	}
 
-	if (LWP_CreateThread(&ws_out_thread, ws_out_worker, NULL, ws_out_stack,
+	if (!ws_out_on) {
+		ws_out_thread = LWP_THREAD_NULL;
+	} else if (LWP_CreateThread(&ws_out_thread, ws_out_worker, NULL, ws_out_stack,
 	                     STACKSIZE, 80) < 0) {
 		/* The IN stream alone still records; just skip the reference feed. */
 		ws_out_thread = LWP_THREAD_NULL;
@@ -1115,6 +1121,13 @@ s32 WS_Stop(void)
 	       (ws_out_x[0].pending || ws_out_x[1].pending) ? "pending" : "idle");
 
 	return WS_OK;
+}
+
+void WS_SetStreams(int in_slots, bool out_stream)
+{
+	if (in_slots >= 1 && in_slots <= ISO_SLOTS)
+		ws_in_slots = in_slots;
+	ws_out_on = out_stream;
 }
 
 void WS_Quiesce(void)

@@ -71,6 +71,10 @@ s32 WS_GetSendLevel(u16 *level);
 s32 WS_Start(void);
 s32 WS_Stop(void);
 
+/* For experiments, before WS_Open(): IN transfers kept in flight (1 or 2)
+ * and whether the OUT (echo-canceller reference) stream runs at all. */
+void WS_SetStreams(int in_slots, bool out_stream);
+
 /* Stops the transfer threads from queueing anything new, without waiting
  * for them or talking to the mic -- for the emergency exit. */
 void WS_Quiesce(void);

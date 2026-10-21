@@ -148,23 +148,27 @@ static void video_init(void)
  * Must run before WPAD and FAT are brought up, since reloading IOS tears down
  * whatever they opened.  IOS 56 is the Wii Speak Channel's own IOS and the
  * first choice; 36 is present on essentially every console as a fallback. */
-static void ensure_usb_ios(void)
+static void ensure_usb_ios(int first)
 {
-	static const int candidates[] = { 56, 55, 53, 38, 37, 36 };
+	static int candidates[] = { 0, 56, 55, 53, 38, 37, 36 };
 	s32 fd;
 	unsigned i;
 
+	candidates[0] = first;
+
 	fd = IOS_Open("/dev/usb/oh0", 0);
-	if (fd >= 0) {
+	if (fd >= 0 && (first == 0 || first == IOS_GetVersion())) {
 		IOS_Close(fd);
 		printf("USB: oh0 present under IOS%d\n", (int)IOS_GetVersion());
 		return;
 	}
+	if (fd >= 0)
+		IOS_Close(fd);
 
 	printf("USB: IOS%d has no oh0; reloading...\n", (int)IOS_GetVersion());
 
 	for (i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
-		if (IOS_ReloadIOS(candidates[i]) < 0)
+		if (candidates[i] == 0 || IOS_ReloadIOS(candidates[i]) < 0)
 			continue;
 
 		fd = IOS_Open("/dev/usb/oh0", 0);
@@ -509,8 +513,23 @@ int main(int argc, char **argv)
 	printf("Wii Speak Recorder\n");
 	printf("==================\n\n");
 
-	/* Before WPAD/FAT: an IOS reload here would tear them down. */
-	ensure_usb_ios();
+	/* Experiment knobs, passed as wiiload arguments: ios=NN slots=1|2
+	 * out=0|1. */
+	{
+		int i, ios = 0, slots = 2, out = 1;
+
+		for (i = 1; i < argc; i++) {
+			sscanf(argv[i], "ios=%d", &ios);
+			sscanf(argv[i], "slots=%d", &slots);
+			sscanf(argv[i], "out=%d", &out);
+		}
+		if (argc > 1)
+			printf("Args: ios=%d slots=%d out=%d\n", ios, slots, out);
+		WS_SetStreams(slots, out != 0);
+
+		/* Before WPAD/FAT: an IOS reload here would tear them down. */
+		ensure_usb_ios(ios);
+	}
 
 	/* Buttons only: no IR pointer and no mouse. */
 	INPUT_InitEx(INPUT_INIT_NO_POINTER | INPUT_INIT_NO_MOUSE);

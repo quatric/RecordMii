@@ -108,7 +108,7 @@ def wiiload_gecko(dol):
     return r.returncode == 0 and "failed" not in r.stdout + r.stderr
 
 
-def wiiload(host, dol):
+def wiiload(host, dol, args=()):
     if host.startswith("/dev/"):
         r = subprocess.run(["wiiload", dol], env=dict(os.environ, WIILOAD=host),
                            capture_output=True, text=True, timeout=300)
@@ -118,7 +118,7 @@ def wiiload(host, dol):
         if not wait_port(host, HBC_PORT, 60):
             break
         time.sleep(1)  # the port opens a moment before the channel listens
-        r = subprocess.run(["wiiload", dol], env=dict(os.environ, WIILOAD="tcp:" + host),
+        r = subprocess.run(["wiiload", dol] + list(args), env=dict(os.environ, WIILOAD="tcp:" + host),
                            capture_output=True, text=True, timeout=120)
         if r.returncode == 0 and "failed" not in r.stdout + r.stderr:
             return True
@@ -164,15 +164,19 @@ def mic_test(con, out, hz):
     summary["stats_before"] = text
     print(text)
 
-    say("recording 3 s of the room")
-    xq, rate = wsdbg.do_pcm(con, 3000, os.path.join(out, "room.wav"), hz)
+    # Raw transfers first: they are the smaller download, and they came
+    # through when a 3 s recording stalled.
+    say("raw transfers of the room")
+    wsdbg.do_cap(con, 1500, out, hz, "room")
+    say("recording 1.5 s of the room")
+    xq, rate = wsdbg.do_pcm(con, 1500, os.path.join(out, "room.wav"), hz)
     sq = wsdbg.stats(xq)
 
     say("raw transfers + recording with a %d Hz tone on the TV" % hz)
     print(con.cmd("tone %d %d 255" % (hz, 6000))[4])
     time.sleep(0.5)
     wsdbg.do_cap(con, 1500, out, hz, "tone")
-    xt, _ = wsdbg.do_pcm(con, 3000, os.path.join(out, "tone.wav"), hz)
+    xt, _ = wsdbg.do_pcm(con, 1500, os.path.join(out, "tone.wav"), hz)
     con.cmd("tone off")
     st = wsdbg.stats(xt)
     share = wsdbg.goertzel(xt, hz, rate)
