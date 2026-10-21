@@ -1,4 +1,5 @@
-/* Wii Speak Recorder -- records the Wii Speak to WAV files on the SD card. */
+/* RecordMii -- records the Wii Speak, or a USB microphone, to WAV files on the
+ * SD card. */
 
 #include <asndlib.h>
 #include <fat.h>
@@ -21,6 +22,7 @@
 #include "netdbg.h"
 #include "playback.h"
 #include "wav.h"
+#include <input_usbmic.h>
 #include <input_wiispeak.h>
 
 #define REC_DIR "sd:/wiispeak"
@@ -60,6 +62,50 @@ static bool sd_ok;
 static int gain_idx = 2;  /* 30 dB */
 static int freq_idx = 2;  /* 16 kHz */
 static char path[64];
+
+/* A class-compliant USB mic, used instead of the Wii Speak when one is
+ * plugged in. */
+static bool usb_mic;
+static um_info umic;
+static int vol_pct;
+
+/* ---- whichever mic is in use --------------------------------------------- */
+
+static u32 mic_rate(void)
+{
+	return usb_mic ? umic.rate : WS_FreqToHz(FREQS[freq_idx]);
+}
+
+static u32 mic_available(void)
+{
+	return usb_mic ? UM_Available() : WS_Available();
+}
+
+static u32 mic_read(s16 *dst, u32 max)
+{
+	return usb_mic ? UM_Read(dst, max) : WS_Read(dst, max);
+}
+
+static u32 mic_dropped(void)
+{
+	return usb_mic ? UM_Dropped() : WS_Dropped();
+}
+
+static void mic_quiesce(void)
+{
+	UM_Quiesce();
+	WS_Quiesce();
+}
+
+static s32 set_volume(int pct)
+{
+	if (pct < 0)
+		pct = 0;
+	if (pct > 100)
+		pct = 100;
+	vol_pct = pct;
+	return UM_SetVolume((u32)pct);
+}
 
 /* ---- test tone ------------------------------------------------------------ */
 
@@ -352,7 +398,7 @@ static void start_recording(void)
 		return;
 	PB_Stop();
 	next_filename(path, sizeof(path));
-	if (WAV_Open(&wav, path, WS_FreqToHz(FREQS[freq_idx])))
+	if (WAV_Open(&wav, path, mic_rate()))
 		recording = true;
 }
 
@@ -379,6 +425,22 @@ static bool debug_command(const char *line, char *reply, size_t size)
 	unsigned a = 0, b = 0, c = 255;
 
 	sscanf(line, "%15s %63[^\n]", cmd, arg);
+
+	if (!strcmp(cmd, "status") && usb_mic) {
+		snprintf(reply, size,
+		         "usb mic %s (%04x:%04x)\n"
+		         "rate %u, %u ch %u-bit, if %u alt %u ep %02x pkt %u\n"
+		         "volume %s %d%% mute %d\n"
+		         "recording %d path %s\n"
+		         "playing %d tone %d\n",
+		         umic.name, umic.vid, umic.pid, (unsigned)umic.rate,
+		         umic.channels, umic.bits, umic.interface, umic.alt,
+		         umic.endpoint, umic.max_packet,
+		         umic.has_volume ? "yes" : "no", vol_pct, muted,
+		         recording, path[0] ? path : "-",
+		         PB_IsPlaying(), tone_voice >= 0);
+		return true;
+	}
 
 	if (!strcmp(cmd, "status")) {
 		u16 lvl = 0, fq = 0;
@@ -448,6 +510,26 @@ static bool debug_command(const char *line, char *reply, size_t size)
 		return true;
 	}
 
+	/* A USB mic has a volume control and maybe a mute, nothing else. */
+	if (usb_mic && (!strcmp(cmd, "vol") || !strcmp(cmd, "mute"))) {
+		s32 ret;
+
+		a = (unsigned)strtoul(arg, NULL, 10);
+		if (!strcmp(cmd, "vol")) {
+			ret = set_volume((int)a);
+		} else {
+			muted = a != 0;
+			ret = UM_SetMute(muted);
+		}
+		snprintf(reply, size, "%s %u -> %d\n", cmd, a, (int)ret);
+		return ret >= 0;
+	}
+	if (usb_mic && (!strcmp(cmd, "gain") || !strcmp(cmd, "freq") ||
+	                !strcmp(cmd, "sp"))) {
+		snprintf(reply, size, "`%s` is for the Wii Speak; a USB mic has vol", cmd);
+		return false;
+	}
+
 	/* Settings, refused mid-recording like their buttons. */
 	if (!strcmp(cmd, "gain") || !strcmp(cmd, "freq") ||
 	    !strcmp(cmd, "sp") || !strcmp(cmd, "mute")) {
@@ -490,11 +572,64 @@ static bool debug_command(const char *line, char *reply, size_t size)
 	return false;
 }
 
-int main(int argc, char **argv)
+/* Boots the Wii Speak and starts it streaming, or stays on an error screen. */
+static void open_wii_speak(void)
 {
 	const u8 *firmware;
 	u32 firmware_size = 0;
 	bool firmware_owned = false;
+	s32 ret;
+
+	firmware = load_firmware(&firmware_size, &firmware_owned);
+	if (!firmware) {
+		printf("Missing pmic_firm.bin.\n\n");
+		printf("The Wii Speak boots from RAM and will not record until\n");
+		printf("the PMIC firmware is uploaded to it. Extract it from an\n");
+		printf("RVL SDK pmic.a with tools/extract_pmic_firmware.py and\n");
+		printf("copy the result to:\n  %s\n", FIRMWARE_PATHS[0]);
+		printf("\nOr build it in with: make firmware SDK=<pmic.a>\n");
+		printf("\nA class-compliant USB mic needs none of this:\n"
+		       "plug one in and start RecordMii again.\n");
+		wait_for_home();
+	}
+
+	printf("Opening the Wii Speak... (HOME or RESET exits)\n");
+	ret = WS_Open(firmware, firmware_size);
+	if (firmware_owned)
+		free((void *)firmware);
+
+	if (ret < 0) {
+		if (ret == WS_ENODEV) {
+			printf("No microphone found: no USB mic and no Wii Speak.\n\n");
+			WS_Diagnose();
+			printf("\nIf the mic is not listed, try the other USB port.\n");
+		}
+		else if (ret == WS_ECANCEL)
+			ESC_Now();
+		else if (ret == WS_EFIRMWARE)
+			printf("The mic did not accept the firmware (it never\n"
+			       "reported ready). Is pmic_firm.bin intact?\n");
+		else
+			printf("WS_Open failed: %d\n", (int)ret);
+		wait_for_home();
+	}
+
+	printf("cfg gain %d\n", (int)WS_SetGain(gain_idx));
+	printf("cfg freq %d\n", (int)WS_SetFreq(FREQS[freq_idx]));
+	printf("cfg sp %d\n", (int)WS_SetSignalProcessing(sp_on));
+	printf("cfg mute %d\n", (int)WS_SetMute(false));
+	printf("starting...\n");
+
+	ret = WS_Start();
+	if (ret < 0) {
+		printf("WS_Start failed: %d\n", (int)ret);
+		WS_Close();
+		wait_for_home();
+	}
+}
+
+int main(int argc, char **argv)
+{
 	s16 *pump;
 	int level = 0;
 	u32 captured = 0;
@@ -502,7 +637,7 @@ int main(int argc, char **argv)
 
 	video_init();
 	ESC_Init();
-	ESC_SetQuiesce(WS_Quiesce);
+	ESC_SetQuiesce(mic_quiesce);
 #ifdef DEADMAN_MS
 	/* Unattended test builds: leave unless the debug client keeps talking. */
 	ESC_SetDeadman(DEADMAN_MS);
@@ -510,8 +645,8 @@ int main(int argc, char **argv)
 	NDBG_HookStdout();
 
 	printf("\x1b[2;0H");
-	printf("Wii Speak Recorder\n");
-	printf("==================\n\n");
+	printf("RecordMii\n");
+	printf("=========\n\n");
 
 	/* Experiment knobs, passed as wiiload arguments: ios=NN slots=1|2
 	 * out=0|1. */
@@ -536,6 +671,7 @@ int main(int argc, char **argv)
 	ESC_WpadReady();
 	WS_SetLog(printf);
 	WS_SetCancel(startup_home);
+	UM_SetLog(printf);
 
 	/* Without a card the mic still works -- the debug console streams it --
 	 * there is just nowhere to save takes. */
@@ -564,55 +700,35 @@ int main(int argc, char **argv)
 	if (!audio_ok)
 		printf("Audio init failed; playback disabled.\n");
 
-	firmware = load_firmware(&firmware_size, &firmware_owned);
-	if (!firmware) {
-		printf("Missing pmic_firm.bin.\n\n");
-		printf("The Wii Speak boots from RAM and will not record until\n");
-		printf("the PMIC firmware is uploaded to it. Extract it from an\n");
-		printf("RVL SDK pmic.a with tools/extract_pmic_firmware.py and\n");
-		printf("copy the result to:\n  %s\n", FIRMWARE_PATHS[0]);
-		printf("\nOr build it in with: make firmware SDK=<pmic.a>\n");
-		wait_for_home();
-	}
-
 	pump = memalign(32, PUMP_SAMPLES * sizeof(s16));
 	if (!pump) {
 		printf("Out of memory.\n");
 		wait_for_home();
 	}
 
-	printf("Opening the Wii Speak... (HOME or RESET exits)\n");
-	ret = WS_Open(firmware, firmware_size);
-	if (firmware_owned)
-		free((void *)firmware);
+	/* A USB mic needs no firmware, so it is looked for first. */
+	printf("Looking for a USB microphone...\n");
+	ret = UM_Open(&umic);
+	if (ret == UM_OK) {
+		usb_mic = true;
+		vol_pct = 100;
+		if (umic.has_volume && umic.vol_max > umic.vol_min)
+			vol_pct = (int)(((s32)umic.vol_cur - umic.vol_min) * 100 /
+			                ((s32)umic.vol_max - umic.vol_min));
+		printf("USB mic: %s, %u Hz\n", umic.name, (unsigned)umic.rate);
 
-	if (ret < 0) {
-		if (ret == WS_ENODEV) {
-			printf("No Wii Speak found.\n\n");
-			WS_Diagnose();
-			printf("\nIf the mic is not listed, try the other USB port.\n");
+		ret = UM_Start();
+		if (ret < 0) {
+			printf("UM_Start failed: %d\n", (int)ret);
+			UM_Close();
+			wait_for_home();
 		}
-		else if (ret == WS_ECANCEL)
-			ESC_Now();
-		else if (ret == WS_EFIRMWARE)
-			printf("The mic did not accept the firmware (it never\n"
-			       "reported ready). Is pmic_firm.bin intact?\n");
+	} else {
+		if (ret != UM_ENODEV)
+			printf("USB mic failed: %d\n", (int)ret);
 		else
-			printf("WS_Open failed: %d\n", (int)ret);
-		wait_for_home();
-	}
-
-	printf("cfg gain %d\n", (int)WS_SetGain(gain_idx));
-	printf("cfg freq %d\n", (int)WS_SetFreq(FREQS[freq_idx]));
-	printf("cfg sp %d\n", (int)WS_SetSignalProcessing(sp_on));
-	printf("cfg mute %d\n", (int)WS_SetMute(false));
-	printf("starting...\n");
-
-	ret = WS_Start();
-	if (ret < 0) {
-		printf("WS_Start failed: %d\n", (int)ret);
-		WS_Close();
-		wait_for_home();
+			printf("None found; trying the Wii Speak.\n");
+		open_wii_speak();
 	}
 
 	/* Clear the boot log off the screen; the debug console keeps it. */
@@ -650,7 +766,12 @@ int main(int argc, char **argv)
 
 		/* Settings only apply between recordings so a file keeps one
 		 * sample rate throughout. */
-		if (!recording) {
+		if (!recording && usb_mic) {
+			if ((pressed & WPAD_BUTTON_UP) && umic.has_volume)
+				set_volume(vol_pct + 10 - vol_pct % 10);
+			if ((pressed & WPAD_BUTTON_DOWN) && umic.has_volume)
+				set_volume(vol_pct % 10 ? vol_pct - vol_pct % 10 : vol_pct - 10);
+		} else if (!recording) {
 			if (pressed & WPAD_BUTTON_RIGHT) {
 				if (freq_idx < 2) {
 					freq_idx++;
@@ -683,15 +804,15 @@ int main(int argc, char **argv)
 
 		/* Drain the mic every frame, whether or not we are recording, so
 		 * the ring buffer never backs up. */
-		held = WS_Available();
+		held = mic_available();
 		while (held > 0) {
-			got = WS_Read(pump, PUMP_SAMPLES);
+			got = mic_read(pump, PUMP_SAMPLES);
 			if (got == 0)
 				break;
 
 			level = meter_level(pump, got);
 			captured += got;
-			NDBG_FeedPcm(pump, got, WS_FreqToHz(FREQS[freq_idx]));
+			NDBG_FeedPcm(pump, got, mic_rate());
 
 			if (recording && !WAV_Write(&wav, pump, got))
 				stop_recording();
@@ -701,21 +822,31 @@ int main(int argc, char **argv)
 
 		NDBG_Quiet(true);
 		printf("\x1b[2;0H");
-		printf("Wii Speak Recorder\n");
-		printf("==================\n\n");
-		printf("Rate  : %5u Hz   %s\n", (unsigned)WS_FreqToHz(FREQS[freq_idx]),
-		       recording ? "" : "(LEFT/RIGHT)   ");
-		printf("Gain  : %5u dB   %s\n", GAIN_DB[gain_idx],
-		       recording ? "" : "(UP/DOWN)      ");
-		printf("Echo  : %-5s      %s\n", sp_on ? "on" : "off",
-		       recording ? "" : "(B toggles)    ");
+		printf("RecordMii\n");
+		printf("=========\n\n");
+		if (usb_mic) {
+			printf("Mic   : %-38.38s\n", umic.name);
+			printf("Rate  : %5u Hz                \n", (unsigned)umic.rate);
+			if (umic.has_volume)
+				printf("Volume: %5d %%    %-15s\n", vol_pct,
+				       recording ? "" : "(UP/DOWN)");
+			else
+				printf("Volume: fixed                 \n");
+		} else {
+			printf("Rate  : %5u Hz   %s\n", (unsigned)WS_FreqToHz(FREQS[freq_idx]),
+			       recording ? "" : "(LEFT/RIGHT)   ");
+			printf("Gain  : %5u dB   %s\n", GAIN_DB[gain_idx],
+			       recording ? "" : "(UP/DOWN)      ");
+			printf("Echo  : %-5s      %s\n", sp_on ? "on" : "off",
+			       recording ? "" : "(B toggles)    ");
+		}
 		printf("\n");
 		printf("Level :");
 		draw_meter(level);
 		printf("\n\n");
 
 		if (recording) {
-			u32 secs = wav.samples / WS_FreqToHz(FREQS[freq_idx]);
+			u32 secs = wav.samples / mic_rate();
 			printf("RECORDING  %02u:%02u  %-28s\n",
 			       (unsigned)(secs / 60), (unsigned)(secs % 60), path);
 		} else if (PB_IsPlaying()) {
@@ -731,7 +862,7 @@ int main(int argc, char **argv)
 		}
 
 		printf("Captured: %u  dropped: %u%-14s\n",
-		       (unsigned)captured, (unsigned)WS_Dropped(), "");
+		       (unsigned)captured, (unsigned)mic_dropped(), "");
 		printf("Debug : %-22s%-8s\n",
 		       NDBG_Address() ? NDBG_Address() : "no network",
 		       NDBG_GeckoActive() ? " +gecko" : "");
@@ -756,7 +887,10 @@ int main(int argc, char **argv)
 	PB_Shutdown();
 	printf("exit: audio down\n");
 
-	WS_Close();
+	if (usb_mic)
+		UM_Close();
+	else
+		WS_Close();
 	printf("exit: mic closed\n");
 	free(pump);
 

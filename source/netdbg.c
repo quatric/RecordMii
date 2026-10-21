@@ -19,6 +19,7 @@
 
 #include "escape.h"
 #include "netdbg.h"
+#include <input_usbmic.h>
 #include <input_wiispeak.h>
 
 /* ---- log ------------------------------------------------------------------ */
@@ -289,7 +290,8 @@ static const char HELP[] =
 	"  deadman <ms>         leave on its own after <ms> without a command (0 off)\n"
 	"Handed to the main loop:\n"
 	"  status\n"
-	"  gain 0-3 | freq 8|11|16 | sp 0|1 | mute 0|1\n"
+	"  gain 0-3 | freq 8|11|16 | sp 0|1 | mute 0|1   (Wii Speak)\n"
+	"  vol 0-100 | mute 0|1                         (USB mic)\n"
 	"  tone <hz> <ms> [vol 0-255] | tone off\n"
 	"  rec start|stop | play [path] | stop\n"
 	"  exit                 clean exit; forced after 5 s if it stalls\n";
@@ -328,6 +330,22 @@ static void cmd_stats(s32 fd)
 {
 	ws_stats st;
 	int i;
+
+	if (UM_IsOpen()) {
+		um_stats us;
+
+		UM_GetStats(&us);
+		sendf(fd, "usb mic calls %u errors %u samples %u empty pkts %u last_ret %d\n",
+		      (unsigned)us.calls, (unsigned)us.errors, (unsigned)us.samples,
+		      (unsigned)us.empty_packets, (int)us.last_ret);
+		sendf(fd, "last sizes");
+		for (i = 0; i < UM_ISO_PACKETS; i++)
+			sendf(fd, " %u", (unsigned)us.last_sizes[i]);
+		sendf(fd, "%s\nbuffered %u  dropped %u\nOK\n",
+		      us.sizes_rewritten ? " (from IOS)" : "",
+		      (unsigned)UM_Available(), (unsigned)UM_Dropped());
+		return;
+	}
 
 	WS_GetStats(&st);
 	sendf(fd, "in  calls %u errors %u samples %u last_ret %d\n",

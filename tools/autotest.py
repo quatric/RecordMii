@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unattended hardware test: load RecordMii, check the Wii Speak hears, leave.
+"""Unattended hardware test: load RecordMii, check the mic hears, leave.
 
     autotest.py HOST [--dol boot.dol] [-o DIR]
     autotest.py /dev/cu.usbserial-GECKUSB0 ...   everything over a USB Gecko
@@ -127,7 +127,8 @@ def wiiload(host, dol, args=()):
     return wiiload_gecko(dol)
 
 
-BOOT_DONE = ("ready after", "never accepted", "Press HOME", "No Wii Speak", "WS_Open failed")
+BOOT_DONE = ("ready after", "never accepted", "Press HOME", "No microphone", "WS_Open failed",
+             "USB mic:", "UM_Start failed")
 
 
 def wait_boot(con, secs):
@@ -139,7 +140,7 @@ def wait_boot(con, secs):
         if any(k in log for k in BOOT_DONE):
             # The sampler is switched on a moment after the mic is ready.
             for _ in range(20):
-                if "sampler on" in log or "Press HOME" in log:
+                if "sampler on" in log or "Press HOME" in log or "USB mic:" in log:
                     break
                 time.sleep(0.5)
                 log += con.cmd("log")[1] + "\n"
@@ -163,11 +164,14 @@ def mic_test(con, out, hz):
     ok, text, *_ = con.cmd("stats")
     summary["stats_before"] = text
     print(text)
+    # Raw transfers are the Wii Speak's; a USB mic only has the recording.
+    usb = text.startswith("usb mic")
 
     # Raw transfers first: they are the smaller download, and they came
     # through when a 3 s recording stalled.
-    say("raw transfers of the room")
-    wsdbg.do_cap(con, 1500, out, hz, "room")
+    if not usb:
+        say("raw transfers of the room")
+        wsdbg.do_cap(con, 1500, out, hz, "room")
     say("recording 1.5 s of the room")
     xq, rate = wsdbg.do_pcm(con, 1500, os.path.join(out, "room.wav"), hz)
     sq = wsdbg.stats(xq)
@@ -175,7 +179,8 @@ def mic_test(con, out, hz):
     say("raw transfers + recording with a %d Hz tone on the TV" % hz)
     print(con.cmd("tone %d %d 255" % (hz, 6000))[4])
     time.sleep(0.5)
-    wsdbg.do_cap(con, 1500, out, hz, "tone")
+    if not usb:
+        wsdbg.do_cap(con, 1500, out, hz, "tone")
     xt, _ = wsdbg.do_pcm(con, 1500, os.path.join(out, "tone.wav"), hz)
     con.cmd("tone off")
     st = wsdbg.stats(xt)

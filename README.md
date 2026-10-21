@@ -5,8 +5,24 @@
 **Work in progress — untested on real hardware.** See Caveats below before
 relying on this for anything.
 
-Homebrew voice recorder for the Wii Speak. Records 16-bit mono WAV files to
-`sd:/wiispeak/rec_NNNN.wav`.
+Homebrew voice recorder for the Wii Speak and USB microphones. Records 16-bit
+mono WAV files to `sd:/wiispeak/rec_NNNN.wav`.
+
+## USB microphones
+
+Any plug-and-play USB mic made for PCs (USB Audio Class 1.0) works, with no
+firmware needed: plug it into either rear USB port before starting RecordMii
+and it is used instead of the Wii Speak. RecordMii reads the formats the mic
+offers and records 16-bit mono at 48 kHz when it can (then 44.1 kHz, then the
+closest rate it has); stereo and 24-bit mics are mixed down to 16-bit mono.
+UP / DOWN change the mic's volume when it has a volume control.
+
+Tested on hardware with a Fifine USB mic (`0c76:161e`, "USB PnP Audio Device"):
+48 kHz mono with no dropped packets. Mics that only work at USB high speed
+(USB Audio Class 2.0) are not supported; the Wii's ports run at full speed.
+
+The driver is in [libwiiinput](https://github.com/quatric/libwiiinput)
+(`input_usbmic.h`).
 
 The Wii Speak is not a USB audio class device — it is a vendor device with its
 own boot and register protocol. This app reimplements Nintendo's `PMIC` library
@@ -78,9 +94,9 @@ an embedded build is ~96 KB larger and prints `Firmware: built in` at startup.
 | A | Start / stop recording |
 | 1 | Play back the last take through the TV |
 | 2 | Stop playback |
-| LEFT / RIGHT | Sample rate: 8000 / 11025 / 16000 Hz |
-| UP / DOWN | Mic gain: 0 / 15 / 30 / 36 dB |
-| B | Toggle the echo canceller |
+| LEFT / RIGHT | Wii Speak sample rate: 8000 / 11025 / 16000 Hz |
+| UP / DOWN | Wii Speak gain: 0 / 15 / 30 / 36 dB; USB mic volume in 10% steps |
+| B | Toggle the Wii Speak's echo canceller |
 | HOME | Exit |
 
 Rate, gain and the echo canceller can only be changed while stopped, so each
@@ -110,6 +126,9 @@ python3 tools/wsdbg.py <wii-ip> help          # every command
 
 `cap` and `tonetest` decode the raw packets every plausible way (packet
 layout and byte order) and write a WAV for each to `wsdbg-out/`.
+
+With a USB mic the console has `vol 0-100` and `mute 0|1` in place of the Wii
+Speak settings, and `stats` reports the USB mic's transfers.
 
 `tools/autotest.py` runs a whole hardware test with nobody at the console:
 
