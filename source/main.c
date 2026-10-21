@@ -56,6 +56,7 @@ static bool sp_on;
 static bool muted;
 static bool audio_ok;
 static bool quit;
+static bool sd_ok;
 static int gain_idx = 2;  /* 30 dB */
 static int freq_idx = 2;  /* 16 kHz */
 static char path[64];
@@ -343,6 +344,8 @@ static u32 update_buttons(void)
 
 static void start_recording(void)
 {
+	if (!sd_ok)
+		return;
 	PB_Stop();
 	next_filename(path, sizeof(path));
 	if (WAV_Open(&wav, path, WS_FreqToHz(FREQS[freq_idx])))
@@ -514,18 +517,22 @@ int main(int argc, char **argv)
 	ESC_WpadReady();
 	WS_SetCancel(startup_home);
 
-	if (!fatInitDefault()) {
-		printf("Could not mount the SD card.\n");
-		wait_for_home();
-	}
+	/* Without a card the mic still works -- the debug console streams it --
+	 * there is just nowhere to save takes. */
+	sd_ok = fatInitDefault();
+	if (sd_ok)
+		mkdir(REC_DIR, 0777);
+	else
+		printf("No SD card: recording to file is off.\n");
 
-	mkdir(REC_DIR, 0777);
-
-	/* One update check at boot: B skips it, failures are silent. */
-	WIIUPDATE_SetAppPath(argc > 0 ? argv[0] : NULL);
-	if (WIIUPDATE_CheckConsole("quatric", "RecordMii", APP_VERSION, update_buttons) == WIIUPDATE_UPDATED) {
-		INPUT_Shutdown();
-		ESC_Now();
+	/* One update check at boot: B skips it, failures are silent.  An
+	 * update installs to the card, so skip it without one. */
+	if (sd_ok) {
+		WIIUPDATE_SetAppPath(argc > 0 ? argv[0] : NULL);
+		if (WIIUPDATE_CheckConsole("quatric", "RecordMii", APP_VERSION, update_buttons) == WIIUPDATE_UPDATED) {
+			INPUT_Shutdown();
+			ESC_Now();
+		}
 	}
 	printf("\n");
 
@@ -699,7 +706,8 @@ int main(int argc, char **argv)
 		} else if (path[0]) {
 			printf("Saved %-40s\n", path);
 		} else {
-			printf("%-46s\n", "Press A to start recording.");
+			printf("%-46s\n", sd_ok ? "Press A to start recording."
+			                         : "No SD card: nothing to record to.");
 		}
 
 		printf("Captured: %u  dropped: %u%-14s\n",
@@ -733,8 +741,10 @@ int main(int argc, char **argv)
 	INPUT_Shutdown();
 	printf("exit: input down\n");
 
-	fatUnmount("sd:");
-	printf("exit: sd unmounted\n");
+	if (sd_ok) {
+		fatUnmount("sd:");
+		printf("exit: sd unmounted\n");
+	}
 
 	NDBG_Stop();
 	printf("exit: network down, returning to loader\n");

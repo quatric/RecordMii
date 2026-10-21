@@ -18,6 +18,7 @@ Exit status: 0 audio heard, 1 no audio, 2 the Wii could not be driven.
 """
 
 import argparse
+import glob
 import json
 import os
 import socket
@@ -69,6 +70,24 @@ def to_loader(host):
     return wait_port(host, HBC_PORT, 120)
 
 
+def gecko_port():
+    """A USB Gecko's serial port on this Mac, if one is attached."""
+    ports = glob.glob("/dev/tty.usbserial-GECK*") + glob.glob("/dev/tty.usbserial-*")
+    return ports[0] if ports else None
+
+
+def wiiload_gecko(dol):
+    """Loads over a USB Gecko instead.  The Homebrew Channel only looks for
+    one in memory card slot B, and only when it starts."""
+    port = gecko_port()
+    if not port:
+        return False
+    say("trying the USB Gecko on %s" % port)
+    r = subprocess.run(["wiiload", dol], env=dict(os.environ, WIILOAD=port),
+                       capture_output=True, text=True, timeout=300)
+    return r.returncode == 0 and "failed" not in r.stdout + r.stderr
+
+
 def wiiload(host, dol):
     for attempt in range(3):
         if not wait_port(host, HBC_PORT, 60):
@@ -80,7 +99,7 @@ def wiiload(host, dol):
             return True
         say("wiiload attempt %d failed: %s" % (attempt + 1, (r.stdout + r.stderr).strip().splitlines()[-1:]))
         time.sleep(5)
-    return False
+    return wiiload_gecko(dol)
 
 
 BOOT_DONE = ("ready after", "never accepted", "Press HOME", "No Wii Speak", "WS_Open failed")
@@ -179,8 +198,8 @@ def main():
         say("summary in %s/summary.json" % a.o)
         sys.exit(code)
 
-    if not to_loader(a.host):
-        say("the Wii is not reachable (no Homebrew Channel, no app)")
+    if not to_loader(a.host) and not gecko_port():
+        say("the Wii is not reachable (no Homebrew Channel, no app, no USB Gecko)")
         finish(2)
 
     say("sending %s" % a.dol)
