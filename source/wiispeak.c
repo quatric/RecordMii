@@ -1076,6 +1076,11 @@ s32 WS_Start(void)
 		printf("  sampler on: %d\n", (int)ret);
 	}
 
+	/* Then unmute, as PMICStart does: the SDK sends exactly these two
+	 * commands in this order.  With the unmute sent first, as it used to
+	 * be, the LED stayed dark and the stream sat at its noise floor. */
+	printf("  mute off: %d\n", (int)ws_set(REG_SAMPLER_MUTE, 0, 0));
+
 	/* Normally already running, started straight after the firmware. */
 	if (ws_start_streams() < 0) {
 		ws_set(REG_SAMPLER_STATE, 0, 0);
