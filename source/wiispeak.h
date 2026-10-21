@@ -71,6 +71,10 @@ s32 WS_GetSendLevel(u16 *level);
 s32 WS_Start(void);
 s32 WS_Stop(void);
 
+/* Stops the transfer threads from queueing anything new, without waiting
+ * for them or talking to the mic -- for the emergency exit. */
+void WS_Quiesce(void);
+
 /* Copies up to `max_samples` host-endian 16-bit mono samples out of the ring
  * buffer and returns how many were taken. */
 u32 WS_Read(s16 *dst, u32 max_samples);

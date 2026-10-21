@@ -73,6 +73,10 @@
 #define ISO_OUT_PKTSIZE  64
 #define ISO_OUT_BYTES    (ISO_OUT_PACKETS * ISO_OUT_PKTSIZE)
 
+/* Transfers kept in flight per direction, as the SDK does.  With only one,
+ * every frame that passes while it is being resubmitted is lost. */
+#define ISO_SLOTS 2
+
 #define FIRMWARE_CHUNK 1024
 #define STATUS_RETRIES 5 /* advisory only; see ws_upload_firmware */
 
@@ -94,10 +98,10 @@ static volatile bool ws_running = false;
 static u8 *ws_cmd;      /* 10-byte command/response buffer, DMA aligned */
 static u8 *ws_status;   /* 1-byte status buffer */
 static u8 *ws_chunk;    /* firmware staging buffer */
-static u8 *ws_in_buf;   /* isochronous IN landing buffer */
-static u8 *ws_out_buf;  /* isochronous OUT (silence) */
-static u16 *ws_in_sizes;
-static u16 *ws_out_sizes;
+static u8 *ws_in_buf[ISO_SLOTS];   /* isochronous IN landing buffers */
+static u8 *ws_out_buf[ISO_SLOTS];  /* isochronous OUT (silence) */
+static u16 *ws_in_sizes[ISO_SLOTS];
+static u16 *ws_out_sizes[ISO_SLOTS];
 
 static s16 *ws_ring;
 static volatile u32 ws_ring_head; /* written by the reader thread */
@@ -125,12 +129,12 @@ static volatile bool ws_swap;
  * worker gives up keeps its DMA buffer alive, so WS_Close must not free it. */
 typedef struct {
 	volatile bool done;
+	volatile bool pending; /* submitted and not yet collected */
 	volatile s32 res;
 } ws_xfer;
 
-static ws_xfer ws_in_x, ws_out_x; /* static: a late completion writes here */
-static volatile bool ws_in_pending;
-static volatile bool ws_out_pending;
+/* static: a late completion writes here */
+static ws_xfer ws_in_x[ISO_SLOTS], ws_out_x[ISO_SLOTS];
 
 u32 WS_FreqToHz(u16 freq)
 {
@@ -197,8 +201,8 @@ static s32 ws_ctrl(u8 type, u8 req, u16 val, u16 idx, u16 len, void *data, int m
 	return ws_async_done ? ws_async_res : WS_ETIMEOUT;
 }
 
-/* Submits one 10-byte command.  When out1/out2 are non-NULL it also reads the
- * reply back; a pure set passes NULL for both and skips the read. */
+/* Submits one 10-byte command and reads its reply back into out1/out2,
+ * either of which may be NULL. */
 static s32 ws_command(u8 reg, u16 arg1, u16 arg2, u16 *out1, u16 *out2)
 {
 	s32 ret;
@@ -219,11 +223,8 @@ static s32 ws_command(u8 reg, u16 arg1, u16 arg2, u16 *out1, u16 *out2)
 	if (ret < 0)
 		goto out;
 
-	if (out1 == NULL && out2 == NULL) {
-		ret = WS_OK;
-		goto out;
-	}
-
+	/* The SDK fetches the response to every command, sets included, and
+	 * the mic may not take the next command until it has been. */
 	ret = ws_ctrl(REQTYPE_VENDOR_IN, REQ_CMD_GET, 0, 0, CMD_LEN, ws_cmd, 500);
 	DCInvalidateRange(ws_cmd, 32);
 	if (ret < 0)
@@ -381,20 +382,23 @@ static s32 ws_upload_firmware(const u8 *firmware, u32 size)
 
 	/* Give the mic time to bring the firmware up before anything talks to
 	 * it, since we cannot read the ready flag to find out. */
-	usleep(500 * 1000);
+	usleep(300 * 1000);
 	(void)ws_wait_status(1, "status after upload");
 
-	/* The SDK selects alt setting 1 again here, after the upload (PMICOpen
-	 * steps 5-6): the mic comes back from its firmware reboot in alt 0,
-	 * which has no endpoints, and refuses every vendor request (-22 from
-	 * IOS) until it is switched.  We cannot read the ready flag (single-byte
-	 * reads never land on this stack), so probe with a real command. */
+	/* The SDK starts the isochronous streams as soon as the mic reports
+	 * ready, and only then sends commands: until the streams run, IOS
+	 * fails every command with -22.  (The first build on hardware sent
+	 * them first, so the sampler was never switched on; once the streams
+	 * were up, the same commands went through.) */
+	printf("  starting the streams\n");
+	ret = ws_start_streams();
+	if (ret < 0)
+		return ret;
+
 	{
 		int ms;
 
-		ws_select_alt1("after upload");
-
-		for (ms = 0; ms < 30000; ms += 100) {
+		for (ms = 0; ms < 15000; ms += 100) {
 			ret = ws_set(REG_SAMPLER_FREQ, WS_FREQ_16KHZ, 0);
 			if (ret >= 0) {
 				printf("  ready after %d ms\n", ms);
@@ -403,13 +407,9 @@ static s32 ws_upload_firmware(const u8 *firmware, u32 size)
 			if (ws_cancel && ws_cancel())
 				return WS_ECANCEL;
 
-			/* Fallbacks, logged so the console shows which one it took. */
-			if (ms == 2000)
+			/* Fallback, logged so the console shows whether it helped. */
+			if (ms == 3000)
 				ws_select_alt1("retry");
-			if (ms == 4000) {
-				printf("  starting the streams early\n");
-				ws_start_streams();
-			}
 			if (ms % 2000 == 1900)
 				printf("  waiting for the mic... (%d)\n", (int)ret);
 			usleep(100 * 1000);
@@ -418,7 +418,6 @@ static s32 ws_upload_firmware(const u8 *firmware, u32 size)
 	}
 
 	/* Carry on regardless, so the debug console can still poke at it. */
-	return WS_OK;
 	return WS_OK;
 }
 
@@ -474,9 +473,8 @@ static bool ws_xfer_wait(ws_xfer *x)
  * the audio sits in the front half of every 32-byte slot with stale bytes
  * between -- reading `ret` bytes from the start of the buffer, as this used
  * to, interleaves real samples with garbage. */
-static u32 ws_extract(s32 ret, s16 *out)
+static u32 ws_extract(s32 ret, const u8 *src, const u16 *sizes, s16 *out)
 {
-	const u8 *src = ws_in_buf;
 	u8 *dst = (u8 *)out;
 	u32 bytes = 0;
 	u32 sum = 0;
@@ -485,8 +483,8 @@ static u32 ws_extract(s32 ret, s16 *out)
 	u32 i;
 
 	for (i = 0; i < ISO_IN_PACKETS; i++) {
-		sum += ws_in_sizes[i];
-		if (ws_in_sizes[i] != ISO_IN_PKTSIZE)
+		sum += sizes[i];
+		if (sizes[i] != ISO_IN_PKTSIZE)
 			rewritten = true;
 	}
 
@@ -501,7 +499,7 @@ static u32 ws_extract(s32 ret, s16 *out)
 
 	if (layout == WS_LAYOUT_SLOTS) {
 		for (i = 0; i < ISO_IN_PACKETS; i++) {
-			u32 n = ws_in_sizes[i];
+			u32 n = sizes[i];
 			if (n > ISO_IN_PKTSIZE)
 				n = ISO_IN_PKTSIZE;
 			memcpy(dst + bytes, src + i * ISO_IN_PKTSIZE, n);
@@ -532,96 +530,140 @@ static u32 ws_extract(s32 ret, s16 *out)
 	return bytes / sizeof(s16);
 }
 
+/* Queues IN transfer `slot`, its buffer poisoned so that stale data is
+ * recognisable in a capture. */
+static s32 ws_in_submit(int slot)
+{
+	ws_xfer *x = &ws_in_x[slot];
+	s32 ret;
+	u32 i;
+
+	for (i = 0; i < ISO_IN_PACKETS; i++)
+		ws_in_sizes[slot][i] = ISO_IN_PKTSIZE;
+	memset(ws_in_buf[slot], 0xEE, ISO_IN_BYTES);
+	DCFlushRange(ws_in_buf[slot], ISO_IN_BYTES);
+	DCFlushRange(ws_in_sizes[slot], 32);
+
+	x->done = false;
+	x->pending = true;
+	ret = USB_ReadIsoMsgAsync(ws_fd, EP_AUDIO_IN, ISO_IN_PACKETS,
+	                          ws_in_sizes[slot], ws_in_buf[slot],
+	                          ws_xfer_cb, x);
+	if (ret < 0) {
+		x->pending = false;
+		ws_st.in_errors++;
+		ws_st.last_in_ret = ret;
+	}
+	return ret;
+}
+
+/* Keeps ISO_SLOTS transfers queued and collects them in submission order. */
 static void *ws_in_worker(void *arg)
 {
 	static s16 samples[ISO_IN_BYTES / sizeof(s16)];
-	ws_xfer *x = &ws_in_x;
+	int slot;
 
 	(void)arg;
 
+	for (slot = 0; slot < ISO_SLOTS; slot++)
+		ws_in_submit(slot);
+
+	slot = 0;
 	while (ws_running) {
+		ws_xfer *x = &ws_in_x[slot];
 		s32 ret;
 		u32 n, i;
 
-		for (i = 0; i < ISO_IN_PACKETS; i++)
-			ws_in_sizes[i] = ISO_IN_PKTSIZE;
-		/* Poison the buffer so stale data is recognisable in a capture. */
-		memset(ws_in_buf, 0xEE, ISO_IN_BYTES);
-		DCFlushRange(ws_in_buf, ISO_IN_BYTES);
-		DCFlushRange(ws_in_sizes, 32);
-
-		x->done = false;
-		ret = USB_ReadIsoMsgAsync(ws_fd, EP_AUDIO_IN, ISO_IN_PACKETS,
-		                          ws_in_sizes, ws_in_buf, ws_xfer_cb, x);
-		if (ret < 0) {
-			ws_st.in_errors++;
-			ws_st.last_in_ret = ret;
+		if (!x->pending && ws_in_submit(slot) < 0) {
 			usleep(1000);
+			slot = (slot + 1) % ISO_SLOTS;
 			continue;
 		}
 
-		ws_in_pending = true;
 		if (!ws_xfer_wait(x))
 			break;
-		ws_in_pending = false;
+		x->pending = false;
 
 		ret = x->res;
-		DCInvalidateRange(ws_in_buf, ISO_IN_BYTES);
-		DCInvalidateRange(ws_in_sizes, 32);
+		DCInvalidateRange(ws_in_buf[slot], ISO_IN_BYTES);
+		DCInvalidateRange(ws_in_sizes[slot], 32);
 
 		ws_st.in_calls++;
 		ws_st.last_in_ret = ret;
 		for (i = 0; i < ISO_IN_PACKETS; i++)
-			ws_st.last_sizes[i] = ws_in_sizes[i];
+			ws_st.last_sizes[i] = ws_in_sizes[slot][i];
 
 		if (ws_tap)
-			ws_tap(ret, ws_in_sizes, ws_in_buf);
+			ws_tap(ret, ws_in_sizes[slot], ws_in_buf[slot]);
 
 		if (ret < 0) {
+			/* Back off: failures can come back instantly, and this
+			 * thread outranks the main loop and the network. */
 			ws_st.in_errors++;
 			usleep(1000);
-			continue;
+		} else {
+			n = ws_extract(ret, ws_in_buf[slot], ws_in_sizes[slot],
+			               samples);
+			ws_st.in_samples += n;
+			if (n > 0)
+				ws_push(samples, n);
 		}
 
-		n = ws_extract(ret, samples);
-		ws_st.in_samples += n;
-		if (n > 0)
-			ws_push(samples, n);
+		if (ws_running)
+			ws_in_submit(slot);
+		slot = (slot + 1) % ISO_SLOTS;
 	}
 
 	return NULL;
+}
+
+static s32 ws_out_submit(int slot)
+{
+	ws_xfer *x = &ws_out_x[slot];
+	s32 ret;
+	u32 i;
+
+	for (i = 0; i < ISO_OUT_PACKETS; i++)
+		ws_out_sizes[slot][i] = ISO_OUT_PKTSIZE;
+	DCFlushRange(ws_out_sizes[slot], 32);
+
+	x->done = false;
+	x->pending = true;
+	ret = USB_WriteIsoMsgAsync(ws_fd, EP_AUDIO_OUT, ISO_OUT_PACKETS,
+	                           ws_out_sizes[slot], ws_out_buf[slot],
+	                           ws_xfer_cb, x);
+	if (ret < 0) {
+		x->pending = false;
+		ws_st.out_errors++;
+		ws_st.last_out_ret = ret;
+	}
+	return ret;
 }
 
 /* The device expects the reference-audio stream to keep running while it is
  * sampling; a recorder has nothing to play back, so it feeds silence. */
 static void *ws_out_worker(void *arg)
 {
-	ws_xfer *x = &ws_out_x;
+	int slot;
 
 	(void)arg;
 
+	for (slot = 0; slot < ISO_SLOTS; slot++)
+		ws_out_submit(slot);
+
+	slot = 0;
 	while (ws_running) {
-		u32 i;
-		s32 ret;
+		ws_xfer *x = &ws_out_x[slot];
 
-		for (i = 0; i < ISO_OUT_PACKETS; i++)
-			ws_out_sizes[i] = ISO_OUT_PKTSIZE;
-		DCFlushRange(ws_out_sizes, 32);
-
-		x->done = false;
-		ret = USB_WriteIsoMsgAsync(ws_fd, EP_AUDIO_OUT, ISO_OUT_PACKETS,
-		                           ws_out_sizes, ws_out_buf, ws_xfer_cb, x);
-		if (ret < 0) {
-			ws_st.out_errors++;
-			ws_st.last_out_ret = ret;
+		if (!x->pending && ws_out_submit(slot) < 0) {
 			usleep(1000);
+			slot = (slot + 1) % ISO_SLOTS;
 			continue;
 		}
 
-		ws_out_pending = true;
 		if (!ws_xfer_wait(x))
 			break;
-		ws_out_pending = false;
+		x->pending = false;
 
 		ws_st.out_calls++;
 		ws_st.last_out_ret = x->res;
@@ -629,6 +671,10 @@ static void *ws_out_worker(void *arg)
 			ws_st.out_errors++;
 			usleep(1000);
 		}
+
+		if (ws_running)
+			ws_out_submit(slot);
+		slot = (slot + 1) % ISO_SLOTS;
 	}
 
 	return NULL;
@@ -638,20 +684,24 @@ static void *ws_out_worker(void *arg)
 
 static void ws_free_buffers(void)
 {
+	int i;
+
 	free(ws_cmd);       ws_cmd = NULL;
 	free(ws_status);    ws_status = NULL;
 	free(ws_chunk);     ws_chunk = NULL;
 	/* A transfer that never completed may still land in these. */
-	if (!ws_in_pending) {
-		free(ws_in_buf);
-		free(ws_in_sizes);
+	for (i = 0; i < ISO_SLOTS; i++) {
+		if (!ws_in_x[i].pending) {
+			free(ws_in_buf[i]);
+			free(ws_in_sizes[i]);
+		}
+		if (!ws_out_x[i].pending) {
+			free(ws_out_buf[i]);
+			free(ws_out_sizes[i]);
+		}
+		ws_in_buf[i] = ws_out_buf[i] = NULL;
+		ws_in_sizes[i] = ws_out_sizes[i] = NULL;
 	}
-	if (!ws_out_pending) {
-		free(ws_out_buf);
-		free(ws_out_sizes);
-	}
-	ws_in_buf = ws_out_buf = NULL;
-	ws_in_sizes = ws_out_sizes = NULL;
 	free(ws_in_stack);  ws_in_stack = NULL;
 	free(ws_out_stack); ws_out_stack = NULL;
 	free(ws_ring);      ws_ring = NULL;
@@ -659,25 +709,36 @@ static void ws_free_buffers(void)
 
 static bool ws_alloc_buffers(void)
 {
+	bool ok = true;
+	int i;
+
 	ws_cmd       = memalign(32, 32);
 	ws_status    = memalign(32, 32);
 	ws_chunk     = memalign(32, FIRMWARE_CHUNK);
-	ws_in_buf    = memalign(32, ISO_IN_BYTES);
-	ws_out_buf   = memalign(32, ISO_OUT_BYTES);
-	ws_in_sizes  = memalign(32, ISO_IN_PACKETS * sizeof(u16));
-	ws_out_sizes = memalign(32, ISO_OUT_PACKETS * sizeof(u16));
 	ws_in_stack  = memalign(32, STACKSIZE);
 	ws_out_stack = memalign(32, STACKSIZE);
 	ws_ring      = memalign(32, RING_SAMPLES * sizeof(s16));
 
-	if (!ws_cmd || !ws_status || !ws_chunk || !ws_in_buf || !ws_out_buf ||
-	    !ws_in_sizes || !ws_out_sizes || !ws_in_stack || !ws_out_stack ||
-	    !ws_ring) {
+	/* The size tables get a whole cache line each: they are flushed and
+	 * invalidated 32 bytes at a time. */
+	for (i = 0; i < ISO_SLOTS; i++) {
+		ws_in_buf[i]    = memalign(32, ISO_IN_BYTES);
+		ws_out_buf[i]   = memalign(32, ISO_OUT_BYTES);
+		ws_in_sizes[i]  = memalign(32, 32);
+		ws_out_sizes[i] = memalign(32, 32);
+		if (!ws_in_buf[i] || !ws_out_buf[i] || !ws_in_sizes[i] ||
+		    !ws_out_sizes[i])
+			ok = false;
+		else
+			memset(ws_out_buf[i], 0, ISO_OUT_BYTES);
+	}
+
+	if (!ok || !ws_cmd || !ws_status || !ws_chunk || !ws_in_stack ||
+	    !ws_out_stack || !ws_ring) {
 		ws_free_buffers();
 		return false;
 	}
 
-	memset(ws_out_buf, 0, ISO_OUT_BYTES);
 	return true;
 }
 
@@ -1000,7 +1061,7 @@ s32 WS_Start(void)
 		printf("  sampler on: %d\n", (int)ret);
 	}
 
-	/* The streams may already be running, started early during boot. */
+	/* Normally already running, started straight after the firmware. */
 	if (ws_start_streams() < 0) {
 		ws_set(REG_SAMPLER_STATE, 0, 0);
 		return WS_ENOMEM;
@@ -1014,9 +1075,10 @@ s32 WS_Stop(void)
 	if (!ws_running)
 		return WS_OK;
 
-	ws_running = false;
-
+	/* While the streams still run: commands fail without them. */
 	printf("  ws: sampler off %d\n", (int)ws_set(REG_SAMPLER_STATE, 0, 0));
+
+	ws_running = false;
 
 	/* The workers poll ws_running while they wait, so these return
 	 * promptly even if a transfer never completes. */
@@ -1029,10 +1091,15 @@ s32 WS_Stop(void)
 		ws_out_thread = LWP_THREAD_NULL;
 	}
 	printf("  ws: threads joined (in %s, out %s)\n",
-	       ws_in_pending ? "pending" : "idle",
-	       ws_out_pending ? "pending" : "idle");
+	       (ws_in_x[0].pending || ws_in_x[1].pending) ? "pending" : "idle",
+	       (ws_out_x[0].pending || ws_out_x[1].pending) ? "pending" : "idle");
 
 	return WS_OK;
+}
+
+void WS_Quiesce(void)
+{
+	ws_running = false;
 }
 
 u32 WS_Read(s16 *dst, u32 max_samples)

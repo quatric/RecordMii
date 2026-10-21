@@ -252,6 +252,7 @@ static const char HELP[] =
 	"  pcm <ms>             what gets recorded: BIN <bytes> <rate>\n"
 	"  ls <dir> | get <path>\n"
 	"  kill                 back to the loader now, no cleanup\n"
+	"  deadman <ms>         leave on its own after <ms> without a command (0 off)\n"
 	"Handed to the main loop:\n"
 	"  status\n"
 	"  gain 0-3 | freq 8|11|16 | sp 0|1 | mute 0|1\n"
@@ -507,6 +508,9 @@ static void handle(s32 fd, char *line, u32 *log_cursor)
 	} else if (!strcmp(line, "swap")) {
 		WS_SetSwap(atoi(args) != 0);
 		sendf(fd, "OK swap %d\n", (int)WS_GetSwap());
+	} else if (!strcmp(line, "deadman")) {
+		ESC_SetDeadman((u32)strtoul(args, NULL, 10));
+		sendf(fd, "OK deadman %s ms\n", *args ? args : "0");
 	} else if (!strcmp(line, "kill")) {
 		sendf(fd, "OK leaving\n");
 		usleep(100 * 1000);
@@ -597,6 +601,7 @@ static void *srv_main(void *arg)
 		while (recv_line(fd, line, sizeof(line))) {
 			if (line[0] == '\0')
 				continue;
+			ESC_Feed();
 			handle(fd, line, &log_cursor);
 		}
 

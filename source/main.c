@@ -495,6 +495,11 @@ int main(int argc, char **argv)
 
 	video_init();
 	ESC_Init();
+	ESC_SetQuiesce(WS_Quiesce);
+#ifdef DEADMAN_MS
+	/* Unattended test builds: leave unless the debug client keeps talking. */
+	ESC_SetDeadman(DEADMAN_MS);
+#endif
 	NDBG_HookStdout();
 
 	printf("\x1b[2;0H");

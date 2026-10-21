@@ -110,6 +110,29 @@ python3 tools/wsdbg.py <wii-ip> help          # every command
 `cap` and `tonetest` decode the raw packets every plausible way (packet
 layout and byte order) and write a WAV for each to `wsdbg-out/`.
 
+`tools/autotest.py` runs a whole hardware test with nobody at the console:
+
+```bash
+make DEADMAN_MS=180000                      # test build, see below
+python3 tools/autotest.py <wii-ip>          # exit status 0 = the mic heard audio
+```
+
+It gets the Wii back to the Homebrew Channel (sending `kill` if RecordMii is
+still running), loads `boot.dol` with wiiload, waits for the mic to boot, and
+pulls audio over TCP: 3 s of the room and 3 s with a tone playing on the TV,
+saved as WAVs in `wsdbg-out/run-*/` along with the logs and a `summary.json`.
+Then it exits the app, heard or not, and checks the Homebrew Channel came back.
+
+The script also arms the app's deadman (`deadman <ms>`), so the app goes back
+to the loader by itself if the script dies or the network drops. A build made
+with `DEADMAN_MS` has it armed from boot, for when the console never connects.
+
+Leaving always reloads IOS before jumping to the Homebrew Channel's stub. The
+stub closes every IOS descriptor first and waits forever for each close, and
+IOS holds a close back while requests on it are outstanding (the mic's
+transfers, a socket in `accept`), which is how a raw jump used to hang. If the
+reload itself stalls, a second top-priority thread jumps after 4 s anyway.
+
 ## Protocol notes
 
 Recovered from `pmic.a` (disassembled) and cross-checked against Dolphin's
@@ -131,14 +154,19 @@ byte-swapped on the way into the WAV.
 1. `0x41` req `0` — reset; the device drops to "not booted"
 2. `0xC1` req `6`, 1 byte — poll until it reads `0`
 3. Bulk-write the firmware to EP `0x02` in 1024-byte chunks
-4. `0xC1` req `6`, 1 byte — poll until it reads `1`
-5. `SET_INTERFACE` interface 0, alt 1
-6. `GET_INTERFACE` — confirms `1`
+4. `0xC1` req `6`, 1 byte — poll until it reads non-zero (up to 260 reads)
+5. Start the isochronous streams: two transfers in flight on each of `0x81`
+   and `0x03`
+
+Only then does the SDK send register commands. Until the streams run, IOS
+fails every command with -22. `SET_INTERFACE` alt 1 and `GET_INTERFACE`
+happen before all this, when the device is opened.
 
 ### Registers
 
 Every setting is a 10-byte command written with `0x41` req `1` and then read
-back through the same buffer with `0xC1` req `2`:
+back through the same buffer with `0xC1` req `2`. The SDK reads the reply
+back after every command, sets included:
 
 ```
 [0..1] 0x9A00 | reg    (bit 0 of reg set = read)
