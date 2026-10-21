@@ -51,6 +51,10 @@ static void __attribute__((noreturn)) jump_to_loader(void)
 {
 	u32 level;
 
+	/* Breadcrumbs go to the TV: if this hangs, the screen says where. */
+	printf("leave: jumping to the %s\n", stub_found() ? "loader stub" : "system menu");
+	fflush(stdout);
+
 	_CPU_ISR_Disable(level);
 	(void)level;
 
@@ -78,10 +82,14 @@ void ESC_Now(void)
 	 * Reloading IOS first throws all of that away.  If the reload itself
 	 * stalls, the rescue thread jumps anyway. */
 	if (reload_started == 0) {
+		s32 ret;
+
+		printf("leave: reloading IOS%d\n", (int)IOS_GetVersion());
 		if (quiesce)
 			quiesce();
 		reload_started = gettime();
-		IOS_ReloadIOS(IOS_GetVersion());
+		ret = IOS_ReloadIOS(IOS_GetVersion());
+		printf("leave: reload %d\n", (int)ret);
 	}
 
 	jump_to_loader();
@@ -164,8 +172,10 @@ static void *rescue_main(void *arg)
 	while (1) {
 		u64 started = reload_started;
 
-		if (started && ticks_to_millisecs(gettime() - started) > RELOAD_GRACE_MS)
+		if (started && ticks_to_millisecs(gettime() - started) > RELOAD_GRACE_MS) {
+			printf("leave: reload stalled\n");
 			jump_to_loader();
+		}
 		usleep(100 * 1000);
 	}
 

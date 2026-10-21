@@ -77,6 +77,9 @@
  * every frame that passes while it is being resubmitted is lost. */
 #define ISO_SLOTS 2
 
+/* Fills IN buffers before each transfer, to tell received data from none. */
+#define ISO_POISON 0xEE
+
 #define FIRMWARE_CHUNK 1024
 #define STATUS_RETRIES 5 /* advisory only; see ws_upload_firmware */
 
@@ -488,21 +491,33 @@ static u32 ws_extract(s32 ret, const u8 *src, const u16 *sizes, s16 *out)
 			rewritten = true;
 	}
 
+	/* On /dev/usb/oh0 a successful isochronous read returns 0, not a byte
+	 * count, and leaves the size table as it was: every packet came back
+	 * full.  Hardware shows exactly that -- result 0, sizes untouched, all
+	 * 256 bytes freshly written with smooth big-endian audio -- so read 0
+	 * as success, and tell real data from nothing by the poison. */
 	if (layout == WS_LAYOUT_AUTO)
-		layout = rewritten ? WS_LAYOUT_SLOTS : WS_LAYOUT_PACKED;
+		layout = (rewritten || ret == 0) ? WS_LAYOUT_SLOTS : WS_LAYOUT_PACKED;
 
-	/* An empty transfer is just that.  This used to fall back to the size
-	 * table, which IOS leaves untouched, and so recorded 256 stale bytes
-	 * per transfer whenever the mic was not actually sampling. */
-	if (ret <= 0 && !rewritten)
+	if (ret < 0)
 		return 0;
 
 	if (layout == WS_LAYOUT_SLOTS) {
 		for (i = 0; i < ISO_IN_PACKETS; i++) {
+			const u8 *pkt = src + i * ISO_IN_PKTSIZE;
 			u32 n = sizes[i];
+			u32 j;
+
 			if (n > ISO_IN_PKTSIZE)
 				n = ISO_IN_PKTSIZE;
-			memcpy(dst + bytes, src + i * ISO_IN_PKTSIZE, n);
+
+			/* Still all poison: nothing arrived in this packet. */
+			for (j = 0; j < n && pkt[j] == ISO_POISON; j++)
+				;
+			if (j == n)
+				continue;
+
+			memcpy(dst + bytes, pkt, n);
 			bytes += n;
 		}
 	} else {
@@ -540,7 +555,7 @@ static s32 ws_in_submit(int slot)
 
 	for (i = 0; i < ISO_IN_PACKETS; i++)
 		ws_in_sizes[slot][i] = ISO_IN_PKTSIZE;
-	memset(ws_in_buf[slot], 0xEE, ISO_IN_BYTES);
+	memset(ws_in_buf[slot], ISO_POISON, ISO_IN_BYTES);
 	DCFlushRange(ws_in_buf[slot], ISO_IN_BYTES);
 	DCFlushRange(ws_in_sizes[slot], 32);
 

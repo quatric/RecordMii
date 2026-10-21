@@ -740,6 +740,7 @@ int main(int argc, char **argv)
 	printf("exit: mic closed\n");
 	free(pump);
 
+	printf("exit: input...\n");
 	INPUT_Shutdown();
 	printf("exit: input down\n");
 
