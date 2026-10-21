@@ -23,11 +23,15 @@ void NDBG_HookStdout(void);
 void NDBG_Quiet(bool quiet);
 
 /* Starts the server thread.  It brings the network up itself if nothing has
- * yet, so it can be called right after the IOS is settled. */
+ * yet, so it can be called right after the IOS is settled.  With a USB
+ * Gecko in slot B the same console runs over that as well. */
 void NDBG_Start(void);
 
 /* Closes the listening socket and takes the network down, on the way out. */
 void NDBG_Stop(void);
+
+/* True when the console also runs over a USB Gecko in slot B. */
+bool NDBG_GeckoActive(void);
 
 /* The server's address once it is listening, else NULL. */
 const char *NDBG_Address(void);

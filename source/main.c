@@ -712,7 +712,9 @@ int main(int argc, char **argv)
 
 		printf("Captured: %u  dropped: %u%-14s\n",
 		       (unsigned)captured, (unsigned)WS_Dropped(), "");
-		printf("Debug : %-30s\n", NDBG_Address() ? NDBG_Address() : "starting...");
+		printf("Debug : %-22s%-8s\n",
+		       NDBG_Address() ? NDBG_Address() : "no network",
+		       NDBG_GeckoActive() ? " +gecko" : "");
 		printf("\nA: record/stop   1: play  2: stop   HOME: exit\n");
 		NDBG_Quiet(false);
 

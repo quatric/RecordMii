@@ -2,6 +2,7 @@
 """Unattended hardware test: load RecordMii, check the Wii Speak hears, leave.
 
     autotest.py HOST [--dol boot.dol] [-o DIR]
+    autotest.py /dev/cu.usbserial-GECKUSB0 ...   everything over a USB Gecko
 
 1. Gets the Wii to the Homebrew Channel: if RecordMii is already running it
    is told to leave (`kill`), then the channel's wiiload port is awaited.
@@ -54,8 +55,27 @@ def say(msg):
     print("[%s] %s" % (time.strftime("%H:%M:%S"), msg), flush=True)
 
 
+def gecko_console(dev, secs):
+    """The app's console over the Gecko, once it answers."""
+    end = time.time() + secs
+    while time.time() < end:
+        try:
+            return wsdbg.Console(dev, timeout=3)
+        except (OSError, TimeoutError):
+            time.sleep(1)
+    return None
+
+
 def to_loader(host):
     """Returns True once the Homebrew Channel is listening."""
+    if host.startswith("/dev/"):
+        con = gecko_console(host, 4)
+        if con:
+            say("RecordMii is running; sending kill over the Gecko")
+            print("  " + con.cmd("kill")[4])
+            con.close()
+            time.sleep(15)
+        return True
     if port_open(host, HBC_PORT):
         return True
     if port_open(host, wsdbg.PORT):
@@ -89,9 +109,14 @@ def wiiload_gecko(dol):
 
 
 def wiiload(host, dol):
+    if host.startswith("/dev/"):
+        r = subprocess.run(["wiiload", dol], env=dict(os.environ, WIILOAD=host),
+                           capture_output=True, text=True, timeout=300)
+        out = (r.stdout + r.stderr).replace("\r", "\n")
+        return r.returncode == 0 and "failed" not in out
     for attempt in range(3):
         if not wait_port(host, HBC_PORT, 60):
-            return False
+            break
         time.sleep(1)  # the port opens a moment before the channel listens
         r = subprocess.run(["wiiload", dol], env=dict(os.environ, WIILOAD="tcp:" + host),
                            capture_output=True, text=True, timeout=120)
@@ -177,6 +202,13 @@ def leave(con, host):
             time.sleep(0.3)
     except (OSError, ConnectionError):
         pass
+    if host.startswith("/dev/"):
+        # The channel does not answer over the Gecko, so all we can tell is
+        # whether the app has stopped answering.
+        time.sleep(5)
+        gone = gecko_console(host, 3) is None
+        say("app %s" % ("has left" if gone else "is STILL answering"))
+        return gone
     back = wait_port(host, HBC_PORT, 90)
     say("Homebrew Channel %s" % ("is back" if back else "did NOT come back"))
     return back
@@ -209,10 +241,15 @@ def main():
     result["loaded"] = True
 
     say("waiting for the debug console")
-    if not wait_port(a.host, wsdbg.PORT, 150):
+    if a.host.startswith("/dev/"):
+        con = gecko_console(a.host, 150)
+    elif wait_port(a.host, wsdbg.PORT, 150):
+        con = wsdbg.Console(a.host)
+    else:
+        con = None
+    if not con:
         say("the console never came up")
         finish(2)
-    con = wsdbg.Console(a.host)
     print("  " + con.cmd("deadman %d" % DEADMAN_MS)[4])
 
     log, booted = wait_boot(con, 90)

@@ -11,16 +11,21 @@
     wsdbg.py HOST get PATH [-o FILE]
     wsdbg.py HOST exitwatch             sends exit, prints the shutdown log
 
-HOST may be HOST:PORT; the port defaults to 4300.
+HOST may be HOST:PORT; the port defaults to 4300.  It may also be a USB
+Gecko's serial device (e.g. /dev/cu.usbserial-GECKUSB0), with the Gecko in
+memory card slot B: the same console runs over it.
 """
 
 import argparse
 import math
 import os
+import select
 import socket
 import struct
 import sys
+import termios
 import time
+import tty
 import wave
 
 PORT = 4300
@@ -28,11 +33,45 @@ PKTS, PKTSIZE = 8, 32
 POISON = 0xEE
 
 
+class GeckoLink:
+    """A USB Gecko's FIFO, with the bits of the socket API Console uses."""
+
+    def __init__(self, path, timeout):
+        self.fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
+        tty.setraw(self.fd)
+        termios.tcflush(self.fd, termios.TCIOFLUSH)
+        self.timeout = timeout
+
+    def recv(self, n):
+        r, _, _ = select.select([self.fd], [], [], self.timeout)
+        if not r:
+            raise TimeoutError("no answer over the USB Gecko")
+        return os.read(self.fd, n)
+
+    def sendall(self, data):
+        while data:
+            data = data[os.write(self.fd, data):]
+
+    def close(self):
+        os.close(self.fd)
+
+
 class Console:
     def __init__(self, host, timeout=30):
+        self.buf = b""
+        if host.startswith("/dev/"):
+            # No connection to announce itself on: ask instead, and skip
+            # whatever was left in the FIFO.
+            self.sock = GeckoLink(host, timeout)
+            self.sock.sendall(b"\nping\n")
+            while True:
+                ln = self._line()
+                if ln.startswith("OK pong"):
+                    break
+            self.banner = "RecordMii debug (gecko)"
+            return
         h, _, p = host.partition(":")
         self.sock = socket.create_connection((h, int(p or PORT)), timeout=timeout)
-        self.buf = b""
         self.banner = self._line()
 
     def _fill(self):

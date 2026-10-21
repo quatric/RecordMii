@@ -15,6 +15,7 @@
 #include <gccore.h>
 #include <ogc/lwp.h>
 #include <ogc/mutex.h>
+#include <ogc/usbgecko.h>
 
 #include "escape.h"
 #include "netdbg.h"
@@ -186,9 +187,31 @@ static volatile s32 srv_sock = -1;
 static lwp_t srv_thread = LWP_THREAD_NULL;
 static u8 srv_stack[32 * 1024] ATTRIBUTE_ALIGN(32);
 
+/* The same console also runs over a USB Gecko in memory card slot B, for
+ * when the network will not come up.  Its "descriptor" is this. */
+#define GECKO_FD  (-2)
+#define GECKO_CHN 1
+
+/* A write gives up after this many polls of a full FIFO, so a Gecko that
+ * nobody is reading from cannot wedge the console. */
+#define GECKO_RETRIES 100000
+
 static bool send_all(s32 fd, const void *data, u32 len)
 {
 	const u8 *p = data;
+
+	if (fd == GECKO_FD) {
+		while (len > 0) {
+			int n = usb_sendbuffer_safe_ex(GECKO_CHN, p,
+			                               len > 4096 ? 4096 : (int)len,
+			                               GECKO_RETRIES);
+			if (n <= 0)
+				return false;
+			p += n;
+			len -= (u32)n;
+		}
+		return true;
+	}
 
 	while (len > 0) {
 		s32 n = net_send(fd, p, len > 16384 ? 16384 : len, 0);
@@ -224,7 +247,18 @@ static bool recv_line(s32 fd, char *line, size_t size)
 
 	while (1) {
 		char c;
-		s32 n = net_recv(fd, &c, 1, 0);
+		s32 n;
+
+		if (fd == GECKO_FD) {
+			/* The Gecko never disconnects; just wait for a byte. */
+			if (usb_recvbuffer_ex(GECKO_CHN, &c, 1, 1000) <= 0) {
+				usleep(2 * 1000);
+				continue;
+			}
+			n = 1;
+		} else {
+			n = net_recv(fd, &c, 1, 0);
+		}
 
 		if (n <= 0)
 			return false;
@@ -611,8 +645,42 @@ static void *srv_main(void *arg)
 	return NULL;
 }
 
+static lwp_t gecko_thread = LWP_THREAD_NULL;
+static u8 gecko_stack[32 * 1024] ATTRIBUTE_ALIGN(32);
+
+static void *gecko_main(void *arg)
+{
+	u32 log_cursor = 0;
+	char line[256];
+
+	(void)arg;
+
+	usb_flush(GECKO_CHN);
+	sendf(GECKO_FD, "RecordMii debug %s (gecko)\n", APP_VERSION);
+
+	while (recv_line(GECKO_FD, line, sizeof(line))) {
+		if (line[0] == '\0')
+			continue;
+		ESC_Feed();
+		handle(GECKO_FD, line, &log_cursor);
+	}
+
+	return NULL;
+}
+
+bool NDBG_GeckoActive(void)
+{
+	return gecko_thread != LWP_THREAD_NULL;
+}
+
 void NDBG_Start(void)
 {
+	if (gecko_thread == LWP_THREAD_NULL && usb_isgeckoalive(GECKO_CHN)) {
+		printf("Debug: USB Gecko in slot B\n");
+		LWP_CreateThread(&gecko_thread, gecko_main, NULL, gecko_stack,
+		                 sizeof(gecko_stack), 50);
+	}
+
 	if (srv_thread != LWP_THREAD_NULL)
 		return;
 
