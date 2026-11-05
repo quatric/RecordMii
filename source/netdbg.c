@@ -357,6 +357,12 @@ static void cmd_stats(s32 fd)
 	sendf(fd, "last sizes");
 	for (i = 0; i < WS_ISO_PACKETS; i++)
 		sendf(fd, " %u", (unsigned)st.last_sizes[i]);
+	sendf(fd, "\nraw in  sizes");
+	for (i = 0; i < WS_ISO_PACKETS; i++)
+		sendf(fd, " %04x", (unsigned)st.last_sizes[i]);
+	sendf(fd, "\nraw out sizes");
+	for (i = 0; i < WS_ISO_PACKETS; i++)
+		sendf(fd, " %04x", (unsigned)st.last_out_sizes[i]);
 	sendf(fd, "\nlayout %d (used %d)  swap %d  buffered %u  dropped %u\n",
 	      WS_GetLayout(), st.last_layout, (int)WS_GetSwap(),
 	      (unsigned)WS_Available(), (unsigned)WS_Dropped());

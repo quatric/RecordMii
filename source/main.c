@@ -614,6 +614,8 @@ static void open_wii_speak(void)
 		wait_for_home();
 	}
 
+	/* WS_SetGain must send the SDK's 0x0300 mask: a bare gain index locks the
+	 * mic's sampler, which then replays one 8 ms block forever. */
 	printf("cfg gain %d\n", (int)WS_SetGain(gain_idx));
 	printf("cfg freq %d\n", (int)WS_SetFreq(FREQS[freq_idx]));
 	printf("cfg sp %d\n", (int)WS_SetSignalProcessing(sp_on));
@@ -651,17 +653,26 @@ int main(int argc, char **argv)
 	/* Experiment knobs, passed as wiiload arguments: ios=NN slots=1|2
 	 * out=0|1. */
 	{
-		int i, ios = 0, slots = 2, out = 1, ven = 0;
+		int i, ios = 0, slots = 2, out = 1, ven = 0, outsig = 0, bootwait = 300, noreset = 0, inpk = 8, cbmode = 0;
 
 		for (i = 1; i < argc; i++) {
 			sscanf(argv[i], "ios=%d", &ios);
 			sscanf(argv[i], "slots=%d", &slots);
 			sscanf(argv[i], "out=%d", &out);
 			sscanf(argv[i], "ven=%d", &ven);
+			sscanf(argv[i], "outsig=%d", &outsig);
+			sscanf(argv[i], "bootwait=%d", &bootwait);
+			sscanf(argv[i], "noreset=%d", &noreset);
+			sscanf(argv[i], "inpk=%d", &inpk);
+			sscanf(argv[i], "cb=%d", &cbmode);
 		}
 		if (argc > 1)
 			printf("Args: ios=%d slots=%d out=%d ven=%d\n", ios, slots, out, ven);
 		WS_SetStreams(slots, out != 0);
+		WS_SetOutSignal(outsig);
+		WS_SetBoot(bootwait, noreset != 0);
+		WS_SetInPackets(inpk);
+		WS_SetCallbackMode(cbmode != 0);
 
 		/* Before WPAD/FAT: an IOS reload here would tear them down.
 		 * ven=1 stays on the running IOS and its /dev/usb/ven, which is
