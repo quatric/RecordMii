@@ -31,9 +31,9 @@ APP_VERSION	?=	$(if $(filter refs/tags/%,$(GITHUB_REF)),$(GITHUB_REF_NAME),$(she
 CFLAGS	+=	-DAPP_VERSION=\"$(APP_VERSION)\"
 # libwiiinput compiles its Wii Speak and USB microphone drivers only with this.
 CFLAGS	+=	-DHAVE_MIC
-# `make firmware` puts the Wii Speak firmware in data/; libwiiinput then builds
-# it in and WS_BuiltinFirmware() returns it.
-FIRMWARE_FILE	:=	$(wildcard $(dir $(abspath $(firstword $(MAKEFILE_LIST))))data/pmic_firm.bin)
+# `make firmware` puts the Wii Speak firmware in libwiiinput/data/; libwiiinput
+# then builds it in and WS_BuiltinFirmware() returns it.
+FIRMWARE_FILE	:=	$(wildcard $(dir $(abspath $(firstword $(MAKEFILE_LIST))))libwiiinput/data/pmic_firm.bin)
 ifneq ($(FIRMWARE_FILE),)
 CFLAGS	+=	-DWS_FIRMWARE_FILE='"$(FIRMWARE_FILE)"'
 endif
@@ -87,7 +87,7 @@ CFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
 CPPFILES	:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
 sFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
 SFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.S)))
-# pmic_firm.bin goes into libwiiinput's WS_BuiltinFirmware() instead (WS_FIRMWARE_FILE below)
+# a leftover data/pmic_firm.bin is not linked: the firmware comes from libwiiinput (WS_FIRMWARE_FILE below)
 BINFILES	:=	$(filter-out pmic_firm.bin,$(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/*.*))))
 
 #---------------------------------------------------------------------------------
@@ -138,19 +138,15 @@ clean:
 	@rm -fr $(BUILD) $(OUTPUT).elf $(OUTPUT).dol $(OUTPUT)-xz.dol
 
 #---------------------------------------------------------------------------------
-# Embeds the Wii Speak boot firmware in the binary.  Point SDK at an RVL SDK
-# pmic.a; without it the app falls back to reading pmic_firm.bin off the SD card
-# at runtime.  Run `make clean` afterwards to pick it up.
+# Embeds the Wii Speak boot firmware in the binary, through libwiiinput: its
+# `make firmware` extracts it from an RVL SDK pmic.a into libwiiinput/data/.
+# Without it the app falls back to reading pmic_firm.bin off the SD card at
+# runtime.  Run `make clean` afterwards to pick it up.
 #---------------------------------------------------------------------------------
 SDK ?=
 
 firmware:
-	@if [ -z "$(SDK)" ]; then \
-		echo "Set SDK to an RVL SDK pmic.a, e.g."; \
-		echo "  make firmware SDK=/path/to/RVL_SDK/RVL/lib/pmic.a"; \
-		exit 1; \
-	fi
-	@python3 tools/extract_pmic_firmware.py "$(SDK)" -o data/pmic_firm.bin
+	@$(MAKE) --no-print-directory -C $(CURDIR)/libwiiinput firmware SDK="$(SDK)"
 
 #---------------------------------------------------------------------------------
 run:

@@ -76,11 +76,13 @@ make clean && make
 ...or keep it separate and put it on the SD card next to `boot.dol`:
 
 ```bash
-python3 tools/extract_pmic_firmware.py /path/to/RVL_SDK/RVL/lib/pmic.a -o pmic_firm.bin
+python3 libwiiinput/tools/extract_pmic_firmware.py /path/to/RVL_SDK/RVL/lib/pmic.a -o pmic_firm.bin
 ```
 
 Either way that pulls the `PMIC_FIRM_DATA` symbol (97,480 bytes) out of
-`pmic_core.o`. The build embeds `data/pmic_firm.bin` whenever it is present and
+`pmic_core.o`. `make firmware` runs libwiiinput's own `make firmware`, which
+writes `libwiiinput/data/pmic_firm.bin`; the library builds that file in
+(`WS_BuiltinFirmware()`), so every app using it shares one copy. The build embeds it whenever it is present and
 falls back to the SD card when it is not, so the tree still builds without it —
 an embedded build is ~96 KB larger and prints `Firmware: built in` at startup.
 

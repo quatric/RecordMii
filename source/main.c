@@ -579,7 +579,7 @@ static void open_wii_speak(void)
 		printf("Missing pmic_firm.bin.\n\n");
 		printf("The Wii Speak boots from RAM and will not record until\n");
 		printf("the PMIC firmware is uploaded to it. Extract it from an\n");
-		printf("RVL SDK pmic.a with tools/extract_pmic_firmware.py and\n");
+		printf("RVL SDK pmic.a with\n  libwiiinput/tools/extract_pmic_firmware.py\nand ");
 		printf("copy the result to:\n  %s\n", FIRMWARE_PATHS[0]);
 		printf("\nOr build it in with: make firmware SDK=<pmic.a>\n");
 		printf("\nA class-compliant USB mic needs none of this:\n"
