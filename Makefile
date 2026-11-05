@@ -29,6 +29,8 @@ CFLAGS	= -g -O2 -Wall -Wextra $(MACHDEP) $(INCLUDE)
 # Version for the update check: the release tag when CI builds one, else meta.xml
 APP_VERSION	?=	$(if $(filter refs/tags/%,$(GITHUB_REF)),$(GITHUB_REF_NAME),$(shell sed -n 's:.*<version>\(.*\)</version>.*:\1:p' $(dir $(abspath $(firstword $(MAKEFILE_LIST))))meta.xml))
 CFLAGS	+=	-DAPP_VERSION=\"$(APP_VERSION)\"
+# libwiiinput compiles its Wii Speak and USB microphone drivers only with this.
+CFLAGS	+=	-DHAVE_MIC
 # `make DEADMAN_MS=180000` builds a test binary that returns to the loader by
 # itself unless the debug client sends a command at least that often.
 ifneq ($(strip $(DEADMAN_MS)),)

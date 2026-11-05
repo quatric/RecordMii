@@ -651,19 +651,25 @@ int main(int argc, char **argv)
 	/* Experiment knobs, passed as wiiload arguments: ios=NN slots=1|2
 	 * out=0|1. */
 	{
-		int i, ios = 0, slots = 2, out = 1;
+		int i, ios = 0, slots = 2, out = 1, ven = 0;
 
 		for (i = 1; i < argc; i++) {
 			sscanf(argv[i], "ios=%d", &ios);
 			sscanf(argv[i], "slots=%d", &slots);
 			sscanf(argv[i], "out=%d", &out);
+			sscanf(argv[i], "ven=%d", &ven);
 		}
 		if (argc > 1)
-			printf("Args: ios=%d slots=%d out=%d\n", ios, slots, out);
+			printf("Args: ios=%d slots=%d out=%d ven=%d\n", ios, slots, out, ven);
 		WS_SetStreams(slots, out != 0);
 
-		/* Before WPAD/FAT: an IOS reload here would tear them down. */
-		ensure_usb_ios(ios);
+		/* Before WPAD/FAT: an IOS reload here would tear them down.
+		 * ven=1 stays on the running IOS and its /dev/usb/ven, which is
+		 * the path the SDK's IUSB library takes. */
+		if (!ven)
+			ensure_usb_ios(ios);
+		else
+			printf("USB: staying on IOS%d (ven)\n", (int)IOS_GetVersion());
 	}
 
 	/* Buttons only: no IR pointer and no mouse. */
