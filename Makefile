@@ -31,6 +31,12 @@ APP_VERSION	?=	$(if $(filter refs/tags/%,$(GITHUB_REF)),$(GITHUB_REF_NAME),$(she
 CFLAGS	+=	-DAPP_VERSION=\"$(APP_VERSION)\"
 # libwiiinput compiles its Wii Speak and USB microphone drivers only with this.
 CFLAGS	+=	-DHAVE_MIC
+# `make firmware` puts the Wii Speak firmware in data/; libwiiinput then builds
+# it in and WS_BuiltinFirmware() returns it.
+FIRMWARE_FILE	:=	$(wildcard $(dir $(abspath $(firstword $(MAKEFILE_LIST))))data/pmic_firm.bin)
+ifneq ($(FIRMWARE_FILE),)
+CFLAGS	+=	-DWS_FIRMWARE_FILE='"$(FIRMWARE_FILE)"'
+endif
 # `make DEADMAN_MS=180000` builds a test binary that returns to the loader by
 # itself unless the debug client sends a command at least that often.
 ifneq ($(strip $(DEADMAN_MS)),)
@@ -81,7 +87,8 @@ CFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
 CPPFILES	:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
 sFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
 SFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.S)))
-BINFILES	:=	$(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/*.*)))
+# pmic_firm.bin goes into libwiiinput's WS_BuiltinFirmware() instead (WS_FIRMWARE_FILE below)
+BINFILES	:=	$(filter-out pmic_firm.bin,$(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/*.*))))
 
 #---------------------------------------------------------------------------------
 # use CXX for linking C++ projects, CC for standard C

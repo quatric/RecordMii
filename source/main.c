@@ -27,15 +27,6 @@
 
 #define REC_DIR "sd:/wiispeak"
 
-/* `make firmware SDK=...` drops the blob in data/, which the build converts
- * into this header.  Without it the app reads the blob off the SD card. */
-#if defined(__has_include)
-#  if __has_include("pmic_firm_bin.h")
-#    include "pmic_firm_bin.h"
-#    define HAVE_EMBEDDED_FIRMWARE 1
-#  endif
-#endif
-
 /* Where the extracted PMIC_FIRM_DATA blob is looked for, in order. */
 static const char *FIRMWARE_PATHS[] = {
 	"sd:/apps/wiispeakrec/pmic_firm.bin",
@@ -261,12 +252,16 @@ static const u8 *load_firmware(u32 *size_out, bool *owned)
 {
 	*owned = false;
 
-#ifdef HAVE_EMBEDDED_FIRMWARE
-	printf("Firmware: built in (%u bytes)\n", (unsigned)pmic_firm_bin_size);
-	*size_out = (u32)pmic_firm_bin_size;
-	return (const u8 *)pmic_firm_bin;
-#else
+	const u8 *builtin;
 	unsigned i;
+
+	/* `make firmware SDK=...` drops the blob in data/, which libwiiinput
+	 * builds in.  Without it the app reads the blob off the SD card. */
+	builtin = WS_BuiltinFirmware(size_out);
+	if (builtin) {
+		printf("Firmware: built in (%u bytes)\n", (unsigned)*size_out);
+		return builtin;
+	}
 
 	for (i = 0; i < sizeof(FIRMWARE_PATHS) / sizeof(FIRMWARE_PATHS[0]); i++) {
 		FILE *fp = fopen(FIRMWARE_PATHS[i], "rb");
@@ -305,7 +300,6 @@ static const u8 *load_firmware(u32 *size_out, bool *owned)
 	}
 
 	return NULL;
-#endif
 }
 
 /* Names a recording rec_YYYYMMDD_HHMMSS.wav from the Wii clock, disambiguating
