@@ -147,7 +147,7 @@ def decode(recs, layout, little):
 
 def stats(x):
     if not x:
-        return dict(n=0, rms=0, dc=0, rough=0, peak=0)
+        return dict(n=0, rms=0, dc=0, rough=0, peak=0, distinct=0)
     n = len(x)
     dc = sum(x) / n
     ac = [v - dc for v in x]
@@ -156,7 +156,7 @@ def stats(x):
     # Audio is smooth: neighbouring samples are close.  White noise -- which
     # is what the wrong byte order or stale bytes look like -- scores ~1.41.
     rough = diff / rms if rms else 0
-    return dict(n=n, rms=rms, dc=dc, rough=rough, peak=max(abs(v) for v in x))
+    return dict(n=n, rms=rms, dc=dc, rough=rough, peak=max(abs(v) for v in x), distinct=len(set(x)))
 
 
 def goertzel(x, freq, rate):

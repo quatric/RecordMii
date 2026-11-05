@@ -150,13 +150,19 @@ def wait_boot(con, secs):
 
 
 def heard(stats_quiet, stats_tone, tone_share):
-    """Decides whether the mic picked anything up.
+    """Decides whether the mic picked up the tone the TV plays.
 
-    Real audio is smooth (rough well below 1.4, which is white noise) and not
-    a constant; a tone the TV plays should also stand out of the spectrum."""
+    Only the tone counts.  A stuck sample value -- what a mic that never
+    started sends -- is smooth and has a nonzero spread once the DC is taken
+    out, so "looks like audio" on its own is not evidence of a working mic.
+    `live` is reported for information (the room recording moves and is
+    smooth); `stuck` flags a recording that is the same in silence and with
+    the tone, which is the failure this check used to miss."""
     live = stats_quiet["n"] > 0 and stats_quiet["rms"] > 2 and stats_quiet["rough"] < 1.2
     tone = tone_share > 0.2 and stats_tone["rms"] > stats_quiet["rms"] * 1.5
-    return live or tone, dict(live=live, tone=tone)
+    similar = stats_quiet["rms"] > 0 and abs(stats_tone["rms"] / stats_quiet["rms"] - 1) < 0.1
+    stuck = similar and stats_quiet.get("distinct", 1 << 30) < 256 and tone_share < 0.2
+    return tone, dict(live=live, tone=tone, stuck=stuck)
 
 
 def mic_test(con, out, hz):
